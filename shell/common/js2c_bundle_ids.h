@@ -30,6 +30,8 @@ inline constexpr char kBrowserInitId[] = "electron/js2c/browser_init";
 inline constexpr char kRendererInitId[] = "electron/js2c/renderer_init";
 inline constexpr char kUtilityInitId[] = "electron/js2c/utility_init";
 inline constexpr char kWorkerInitId[] = "electron/js2c/worker_init";
+inline constexpr char kWorkerThreadInitId[] =
+    "electron/js2c/worker_thread_init";
 
 // Wrapper function parameter names for the bundles compiled via
 // util::CompileAndCall. The *_init bundles run by node::LoadEnvironment use
@@ -42,6 +44,8 @@ inline constexpr std::array<std::string_view, 1> kPreloadRealmBundleParams = {
     "binding"};
 inline constexpr std::array<std::string_view, 2> kNodeInitParams = {"process",
                                                                     "require"};
+inline constexpr std::array<std::string_view, 2> kWorkerThreadInitParams = {
+    "process", "require"};
 
 // Builds the `parameters` arg for util::CompileAndCall from one of the
 // constexpr param arrays above.

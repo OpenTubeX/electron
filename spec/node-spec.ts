@@ -230,6 +230,55 @@ describe('node feature', () => {
     });
   });
 
+  describe('worker_threads in the main process', () => {
+    const runInWorker = async (source: string) => {
+      const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
+      const worker = new Worker(`require('node:worker_threads').parentPort.postMessage((() => { ${source} })())`, {
+        eval: true
+      });
+      try {
+        const [result] = await once(worker, 'message');
+        return result;
+      } finally {
+        await worker.terminate();
+      }
+    };
+
+    it('reports process.type as worker-thread', async () => {
+      expect(await runInWorker('return process.type')).to.equal('worker-thread');
+    });
+
+    it('can require electron and its aliases', async () => {
+      const result = await runInWorker(`
+        const electron = require('electron');
+        return [typeof electron, require('electron/worker-thread') === electron, require('electron/common') === electron];
+      `);
+      expect(result).to.deep.equal(['object', true, true]);
+    });
+
+    it('applies to nested worker threads', async () => {
+      const result = await runInWorker(`
+        const { Worker, receiveMessageOnPort, MessageChannel } = require('node:worker_threads');
+        const sab = new Int32Array(new SharedArrayBuffer(4));
+        const { port1, port2 } = new MessageChannel();
+        const w = new Worker("const { workerData } = require('node:worker_threads'); workerData.port.postMessage(process.type + ':' + typeof require('electron')); Atomics.store(workerData.sab, 0, 1); Atomics.notify(workerData.sab, 0);", { eval: true, workerData: { port: port2, sab }, transferList: [port2] });
+        Atomics.wait(sab, 0, 0, 5000);
+        const message = receiveMessageOnPort(port1);
+        w.terminate();
+        return message && message.message;
+      `);
+      expect(result).to.equal('worker-thread:object');
+    });
+
+    it('keeps reading asar archives through fs', async () => {
+      const asar = path.join(fixtures, 'test.asar', 'a.asar', 'file1');
+      const result = await runInWorker(
+        `return require('node:fs').readFileSync(${JSON.stringify(asar)}, 'utf8').trim()`
+      );
+      expect(result).to.equal('file1');
+    });
+  });
+
   describe('EventSource', () => {
     itremote('works correctly when nodeIntegration is enabled in the renderer', () => {
       const es = new EventSource('https://example.com');

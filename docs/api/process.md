@@ -117,6 +117,8 @@ A `string` representing the current process's type, can be:
 * `service-worker` - In a service worker
 * `worker` - In a web worker
 * `utility` - In a node process launched as a service
+* `worker-thread` - In a Node.js [worker thread](https://nodejs.org/api/worker_threads.html)
+  created from any of the above
 
 ### `process.versions.chrome` _Readonly_
 

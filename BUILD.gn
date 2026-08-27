@@ -270,6 +270,15 @@ webpack_build("electron_utility_bundle") {
   out_file = "$target_gen_dir/js2c/utility_init.js"
 }
 
+webpack_build("electron_worker_thread_bundle") {
+  deps = [ ":build_electron_definitions" ]
+
+  inputs = auto_filenames.worker_thread_bundle_deps
+
+  config_file = "//electron/build/webpack/webpack.config.worker_thread.js"
+  out_file = "$target_gen_dir/js2c/worker_thread_init.js"
+}
+
 webpack_build("electron_preload_realm_bundle") {
   deps = [ ":build_electron_definitions" ]
 
@@ -289,6 +298,7 @@ action("electron_js2c") {
     ":electron_sandboxed_renderer_bundle",
     ":electron_utility_bundle",
     ":electron_worker_bundle",
+    ":electron_worker_thread_bundle",
     "//third_party/electron_node:node_js2c($electron_js2c_toolchain)",
   ]
 
@@ -301,6 +311,7 @@ action("electron_js2c") {
     "$target_gen_dir/js2c/sandbox_bundle.js",
     "$target_gen_dir/js2c/utility_init.js",
     "$target_gen_dir/js2c/worker_init.js",
+    "$target_gen_dir/js2c/worker_thread_init.js",
   ]
 
   inputs = sources

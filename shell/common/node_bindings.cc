@@ -1005,7 +1005,22 @@ void NodeBindings::LoadEnvironment(node::Environment* env) {
   // node-internal entries are kept. A no-op merge when bootstrapped from
   // scratch.
   electron::util::FeedEnvironmentCodeCache(env);
-  node::LoadEnvironment(env, node::StartExecutionCallback{}, &OnNodePreload);
+  // Node runs the preload in this environment and, on their own threads, in
+  // every worker_threads Worker it (transitively) creates.
+  node::LoadEnvironment(
+      env, node::StartExecutionCallback{},
+      [](node::Environment* env, v8::Local<v8::Value> process,
+         v8::Local<v8::Value> require) {
+        OnNodePreload(env, process, require);
+        if (env->is_main_thread())
+          return;
+        v8::LocalVector<v8::String> params = js2c::MakeBundleParams(
+            env->isolate(), js2c::kWorkerThreadInitParams);
+        v8::LocalVector<v8::Value> args(env->isolate(), {process, require});
+        electron::util::CompileAndCall(env->isolate(), env->context(),
+                                       js2c::kWorkerThreadInitId, &params,
+                                       &args);
+      });
   gin_helper::EmitEvent(env->isolate(), env->process_object(), "loaded");
 }
 

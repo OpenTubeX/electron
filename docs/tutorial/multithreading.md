@@ -23,6 +23,15 @@ The `nodeIntegrationInWorker` can be used independent of `nodeIntegration`, but
 > [!NOTE]
 > This option is not available in [`SharedWorker`s](https://developer.mozilla.org/en-US/docs/Web/API/SharedWorker) or [`Service Worker`s](https://developer.mozilla.org/en-US/docs/Web/API/ServiceWorker) owing to incompatibilities in sandboxing policies.
 
+## Node.js worker threads
+
+The main process, utility processes and renderers with Node.js integration can
+create Node.js [worker threads](https://nodejs.org/api/worker_threads.html)
+with `require('node:worker_threads')`. Inside such a thread `process.type` is
+`'worker-thread'`, `asar` archives can be read with Node.js APIs, and
+`require('electron')` resolves, although it does not currently expose any of
+Electron's modules there.
+
 ## Available APIs
 
 All built-in modules of Node.js are supported in Web Workers, and `asar`

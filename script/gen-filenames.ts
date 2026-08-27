@@ -78,6 +78,10 @@ const main = async () => {
       config: 'webpack.config.utility.js'
     },
     {
+      name: 'worker_thread_bundle_deps',
+      config: 'webpack.config.worker_thread.js'
+    },
+    {
       name: 'preload_realm_bundle_deps',
       config: 'webpack.config.preload_realm.js'
     }

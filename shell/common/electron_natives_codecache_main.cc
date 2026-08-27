@@ -61,17 +61,19 @@ std::vector<Bundle> BundlesForFlavor(std::string_view flavor,
   const Bundle kRendererInit{js2c::kRendererInitId, false, {}};
   const Bundle kUtilityInit{js2c::kUtilityInitId, false, {}};
   const Bundle kWorkerInit{js2c::kWorkerInitId, false, {}};
+  const Bundle kWorkerThreadInit{js2c::kWorkerThreadInitId, true,
+                                 js2c::kWorkerThreadInitParams};
 
   if (flavor == "sandbox")
     return {kSandbox, kIsolated, kPreloadRealm};
   if (flavor == "renderer")
-    return {kRendererInit, kNodeInit, kIsolated};
+    return {kRendererInit, kNodeInit, kIsolated, kWorkerThreadInit};
   if (flavor == "browser" && from_node_snapshot)
-    return {kBrowserInit, kUtilityInit, kNodeInit};
+    return {kBrowserInit, kUtilityInit, kNodeInit, kWorkerThreadInit};
   if (flavor == "browser")
-    return {kBrowserInit, kNodeInit};
+    return {kBrowserInit, kNodeInit, kWorkerThreadInit};
   if (flavor == "utility")
-    return {kUtilityInit, kNodeInit};
+    return {kUtilityInit, kNodeInit, kWorkerThreadInit};
   if (flavor == "worker")
     return {kWorkerInit, kNodeInit};
   return {};
