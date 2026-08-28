@@ -170,8 +170,7 @@ describe('asar package', () => {
   });
 
   describe('worker threads', function () {
-    // DISABLED-FIXME(#38192): only disabled for ASan.
-    ifit(!process.env.IS_ASAN)('should start worker thread from asar file', function (callback) {
+    it('should start worker thread from asar file', function (callback) {
       const p = path.join(asarDir, 'worker_threads.asar', 'worker.js');
       const w = new Worker(p);
 

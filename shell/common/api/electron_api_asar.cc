@@ -4,6 +4,7 @@
 
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "shell/common/asar/archive.h"
 #include "shell/common/asar/asar_util.h"
@@ -47,8 +48,23 @@ class Archive : public node::ObjectWrap {
   Archive& operator=(const Archive&) = delete;
 
  protected:
-  explicit Archive(std::shared_ptr<asar::Archive> archive)
-      : archive_(std::move(archive)) {}
+  Archive(node::Environment* env, std::shared_ptr<asar::Archive> archive)
+      : env_(env), archive_(std::move(archive)) {
+    // A worker thread's environment can go away without collecting its
+    // wrappers; free this one with it.
+    node::AddEnvironmentCleanupHook(env_->isolate(), &Archive::DeleteOnCleanup,
+                                    this);
+  }
+  ~Archive() override {
+    node::RemoveEnvironmentCleanupHook(env_->isolate(),
+                                       &Archive::DeleteOnCleanup, this);
+  }
+
+  static void DeleteOnCleanup(void* archive) {
+    auto* self = static_cast<Archive*>(archive);
+    self->persistent().Reset();
+    delete self;
+  }
 
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args) {
     auto* isolate = args.GetIsolate();
@@ -67,7 +83,8 @@ class Archive : public node::ObjectWrap {
       return;
     }
 
-    auto* archive_wrap = new Archive(std::move(archive));
+    auto* archive_wrap =
+        new Archive(node::Environment::GetCurrent(isolate), std::move(archive));
     archive_wrap->Wrap(args.This());
     args.GetReturnValue().Set(args.This());
   }
@@ -199,6 +216,7 @@ class Archive : public node::ObjectWrap {
         isolate, wrap->archive_ ? wrap->archive_->GetUnsafeFD() : -1));
   }
 
+  const raw_ptr<node::Environment> env_;
   std::shared_ptr<asar::Archive> archive_;
 };
 

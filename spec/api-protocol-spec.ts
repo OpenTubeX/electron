@@ -924,24 +924,22 @@ describe('protocol module', () => {
     const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
     let worker: import('node:worker_threads').Worker;
     const startWorker = async (source: string) => {
-      worker = new Worker(
-        `
-        const { parentPort } = require('node:worker_threads');
-        const { protocol } = require('electron');
-        (async () => { ${source} })().then((v) => parentPort.postMessage({ ready: v }), (e) => parentPort.postMessage({ error: String(e) }));
-        parentPort.on('message', (m) => { if (m === 'stop') { protocol.unhandle('http-like'); parentPort.postMessage('stopped'); } });
-      `,
-        { eval: true }
-      );
+      worker = new Worker(path.join(fixturesPath, 'workers', 'worker-thread', 'protocol-host.js'), {
+        workerData: { source, scheme: 'http-like' }
+      });
       const [message] = await once(worker, 'message');
       if (message.error) throw new Error(message.error);
       return message.ready;
     };
+    const stopWorker = async () => {
+      if (!worker) return;
+      const exited = once(worker, 'exit');
+      worker.postMessage('exit');
+      await exited;
+      worker = null as any;
+    };
     afterEach(async () => {
-      if (worker) {
-        await worker.terminate();
-        worker = null as any;
-      }
+      await stopWorker();
       await closeAllWindows();
     });
 
@@ -1070,7 +1068,7 @@ describe('protocol module', () => {
       } finally {
         protocol.unhandle('http-like');
       }
-      await worker.terminate();
+      await stopWorker();
       await startWorker("await protocol.handle('http-like', () => new Response('worker'));");
       expect(protocol.isProtocolHandled('http-like')).to.equal(true);
       expect(() => protocol.handle('http-like', () => new Response('main'))).to.throw();
@@ -1079,8 +1077,7 @@ describe('protocol module', () => {
       await setTimeout(50);
       expect(protocol.isProtocolHandled('http-like')).to.equal(false);
       await startWorker("await protocol.handle('http-like', () => new Response('again'));");
-      await worker.terminate();
-      worker = null as any;
+      await stopWorker();
       await setTimeout(50);
       expect(protocol.isProtocolHandled('http-like')).to.equal(false);
       await startWorker(

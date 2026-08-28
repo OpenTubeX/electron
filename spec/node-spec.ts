@@ -231,17 +231,13 @@ describe('node feature', () => {
   });
 
   describe('worker_threads in the main process', () => {
+    const workerFixtures = path.join(fixtures, 'workers', 'worker-thread');
     const runInWorker = async (source: string) => {
       const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
-      const worker = new Worker(`require('node:worker_threads').parentPort.postMessage((() => { ${source} })())`, {
-        eval: true
-      });
-      try {
-        const [result] = await once(worker, 'message');
-        return result;
-      } finally {
-        await worker.terminate();
-      }
+      const worker = new Worker(path.join(workerFixtures, 'run.js'), { workerData: { source } });
+      const [result] = await once(worker, 'message');
+      await once(worker, 'exit');
+      return result;
     };
 
     it('reports process.type as worker-thread', async () => {
@@ -261,10 +257,10 @@ describe('node feature', () => {
         const { Worker, receiveMessageOnPort, MessageChannel } = require('node:worker_threads');
         const sab = new Int32Array(new SharedArrayBuffer(4));
         const { port1, port2 } = new MessageChannel();
-        const w = new Worker("const { workerData } = require('node:worker_threads'); workerData.port.postMessage(process.type + ':' + typeof require('electron')); Atomics.store(workerData.sab, 0, 1); Atomics.notify(workerData.sab, 0);", { eval: true, workerData: { port: port2, sab }, transferList: [port2] });
+        const w = new Worker(${JSON.stringify(path.join(workerFixtures, 'nested.js'))}, { workerData: { port: port2, sab }, transferList: [port2] });
         Atomics.wait(sab, 0, 0, 5000);
         const message = receiveMessageOnPort(port1);
-        w.terminate();
+        w.unref();
         return message && message.message;
       `);
       expect(result).to.equal('worker-thread:object');
