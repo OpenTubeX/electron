@@ -17,7 +17,7 @@ import { setTimeout } from 'node:timers/promises';
 import * as url from 'node:url';
 
 import { collectStreamBody, getResponse } from './lib/net-helpers';
-import { listen, defer, ifit } from './lib/spec-helpers';
+import { listen, defer, ifdescribe, ifit } from './lib/spec-helpers';
 import { WebmGenerator } from './lib/video-helpers';
 import { closeAllWindows, closeWindow } from './lib/window-helpers';
 
@@ -919,7 +919,8 @@ describe('protocol module', () => {
     });
   });
 
-  describe('protocol.handle in a worker thread', () => {
+  // See the note on worker_threads and ASan in node-spec.ts.
+  ifdescribe(!process.env.IS_ASAN)('protocol.handle in a worker thread', () => {
     // Uses the 'http-like' scheme registered as standard in spec/index.js.
     const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
     let worker: import('node:worker_threads').Worker;

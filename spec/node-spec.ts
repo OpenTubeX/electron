@@ -230,7 +230,9 @@ describe('node feature', () => {
     });
   });
 
-  describe('worker_threads in the main process', () => {
+  // Node.js worker threads trip V8's stack-limit DCHECK under ASan (the
+  // worker's limit is computed from the real stack, ASan runs on fake ones).
+  ifdescribe(!process.env.IS_ASAN)('worker_threads in the main process', () => {
     const workerFixtures = path.join(fixtures, 'workers', 'worker-thread');
     const runInWorker = async (source: string) => {
       const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
