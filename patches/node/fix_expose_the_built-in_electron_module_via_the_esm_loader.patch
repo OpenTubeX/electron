@@ -89,7 +89,7 @@ index e34e6f58538fc57791d8bc73bcc38cc6b9072d24..91cf127534088ad8c3b9b5effc828bf5
        if (cjsModule?.[kIsExecuting]) {
          const parentFilename = urlToFilename(parentURL);
 diff --git a/lib/internal/modules/esm/resolve.js b/lib/internal/modules/esm/resolve.js
-index f6c8078228419eaca8fbed5a9d43d8b56cacffb0..e7311af43237c9459263d15c6b10749b92a5b7d3 100644
+index f6c8078228419eaca8fbed5a9d43d8b56cacffb0..70d97bafc436539f08aba1d1130666b118e5343e 100644
 --- a/lib/internal/modules/esm/resolve.js
 +++ b/lib/internal/modules/esm/resolve.js
 @@ -752,6 +752,9 @@ function packageImportsResolve(name, base, conditions) {
