@@ -119,10 +119,10 @@ export async function handle(scheme: string, handler: Handler) {
   }
   if (handlers.has(scheme)) throw new Error(`Already handling ${scheme} in this worker`);
   handlers.set(scheme, handler);
-  const ok = await binding.handle('', scheme);
-  if (!ok) {
+  const error = await binding.handle('', scheme);
+  if (error) {
     if (handlers.get(scheme) === handler) handlers.delete(scheme);
-    throw new Error(`Failed to register protocol: ${scheme} is already handled`);
+    throw new Error(error);
   }
 }
 

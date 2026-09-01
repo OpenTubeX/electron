@@ -1132,6 +1132,31 @@ describe('protocol module', () => {
       ).to.equal('text/html:true');
     });
 
+    it('rejects built-in schemes', async () => {
+      await expect(
+        startWorker("await protocol.handle('https', () => new Response('no'));")
+      ).to.eventually.be.rejectedWith(/Built-in scheme/);
+      await stopWorker();
+      await expect(
+        startWorker("await protocol.handle('file', () => new Response('no'));")
+      ).to.eventually.be.rejectedWith(/Built-in scheme/);
+    });
+
+    it('lets another worker take over a scheme for pages that are already open', async () => {
+      await startWorker(
+        "await protocol.handle('http-like', (req) => new Response(new URL(req.url).pathname === '/' ? '<!doctype html><p>page</p>' : 'first', { headers: { 'content-type': 'text/html' } }));"
+      );
+      const w = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      await w.loadURL('http-like://host/');
+      const fromPage = () =>
+        w.webContents.executeJavaScript("fetch('/data').then(r => r.text(), e => 'failed: ' + e.message)");
+      expect(await fromPage()).to.equal('first');
+      await stopWorker();
+      expect(await fromPage()).to.match(/^failed/);
+      await startWorker("await protocol.handle('http-like', () => new Response('second'));");
+      expect(await fromPage()).to.equal('second');
+    });
+
     it('refuses a scheme the main thread already handles and releases it on unhandle or exit', async () => {
       protocol.handle('http-like', () => new Response('main'));
       try {

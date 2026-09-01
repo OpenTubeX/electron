@@ -295,7 +295,7 @@ declare namespace NodeJS {
         onCancel: (id: number) => void,
         onWritten: (id: number, bytesWritten: number) => void
       ): void;
-      handle(partition: string, scheme: string): Promise<boolean>;
+      handle(partition: string, scheme: string): Promise<string>;
       unhandle(scheme: string): void;
       respond(id: number, status: number, statusText: string, headers: [string, string][], hasBody: boolean): void;
       write(id: number, chunk: Uint8Array): void;

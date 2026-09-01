@@ -23,6 +23,7 @@ namespace electron {
 
 class ElectronBrowserContext;
 class WorkerProtocolEndpoint;
+class WorkerProtocolSlot;
 
 class ProtocolRegistry {
  public:
@@ -61,11 +62,15 @@ class ProtocolRegistry {
   // Schemes served by a handler running in a Node.js worker thread; see
   // shell/browser/net/worker_protocol.h. A scheme has at most one handler of
   // either kind.
+  // Schemes Chromium or the network service serve themselves; a worker cannot
+  // take these over.
+  static bool IsBuiltinScheme(std::string_view scheme);
   bool RegisterWorkerProtocol(const std::string& scheme,
                               scoped_refptr<WorkerProtocolEndpoint> endpoint);
   bool UnregisterWorkerProtocol(const std::string& scheme,
                                 WorkerProtocolEndpoint* endpoint);
   bool IsRegistered(std::string_view scheme) const;
+  bool IsWorkerRegistered(std::string_view scheme) const;
   // A factory serving `scheme` if a handler of either kind is registered for
   // it (not intercepted schemes), else an invalid remote.
   mojo::PendingRemote<network::mojom::URLLoaderFactory> CreateRegisteredFactory(
@@ -80,7 +85,9 @@ class ProtocolRegistry {
 
   HandlersMap handlers_;
   HandlersMap intercept_handlers_;
-  std::map<std::string, scoped_refptr<WorkerProtocolEndpoint>, std::less<>>
+  // Slots stay once created so factories handed out earlier follow a scheme
+  // from one worker to the next; an empty slot means no worker handles it.
+  std::map<std::string, scoped_refptr<WorkerProtocolSlot>, std::less<>>
       worker_handlers_;
 };
 

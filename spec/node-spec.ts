@@ -254,6 +254,14 @@ describe('node feature', () => {
       expect(result).to.deep.equal(['object', true, true]);
     });
 
+    it('can import electron/worker-thread from an ES module', async () => {
+      const { Worker } = require('node:worker_threads') as typeof import('node:worker_threads');
+      const worker = new Worker(path.join(workerFixtures, 'import.mjs'));
+      const [result] = await once(worker, 'message');
+      await once(worker, 'exit');
+      expect(result).to.equal(true);
+    });
+
     it('applies to nested worker threads', async () => {
       const result = await runInWorker(`
         const { Worker, receiveMessageOnPort, MessageChannel } = require('node:worker_threads');

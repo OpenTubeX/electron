@@ -97,7 +97,7 @@ index b028f44f01388605e114130c138568f0bceea76d..185793fa305edbeab299f743e0018f34
  }
  
 +const electronTypes = [
-+  'electron', 'electron/main', 'electron/common', 'electron/renderer', 'electron/utility'
++  'electron', 'electron/main', 'electron/common', 'electron/renderer', 'electron/utility', 'electron/worker-thread'
 +];
  
  /**

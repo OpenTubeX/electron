@@ -85,6 +85,8 @@ class WorkerProtocolEndpoint
   void QueueRequest(std::unique_ptr<Request> request,
                     base::WeakPtr<WorkerProtocolLoader> loader);
   void QueueCancel(uint64_t id);
+  // IO thread: stop routing replies for `id` to its loader.
+  void ForgetLoader(uint64_t id);
   void QueueWritten(uint64_t id, uint64_t bytes_written);
   // Any thread -> worker: run `callback` on the worker thread.
   void PostToWorker(base::OnceClosure callback);
@@ -116,9 +118,25 @@ class WorkerProtocolEndpoint
 
 // Creates, on the IO thread, a URLLoaderFactory that serves requests through
 // `endpoint`, and returns the other end.
+// The worker currently handling one scheme of a session. Factories hold the
+// slot rather than an endpoint so frames created while one worker handled the
+// scheme keep working after another takes over.
+class WorkerProtocolSlot
+    : public base::RefCountedThreadSafe<WorkerProtocolSlot> {
+ public:
+  WorkerProtocolSlot();
+  scoped_refptr<WorkerProtocolEndpoint> Get() const;
+  void Set(scoped_refptr<WorkerProtocolEndpoint> endpoint);
+
+ private:
+  friend class base::RefCountedThreadSafe<WorkerProtocolSlot>;
+  ~WorkerProtocolSlot();
+  mutable base::Lock lock_;
+  scoped_refptr<WorkerProtocolEndpoint> endpoint_ GUARDED_BY(lock_);
+};
+
 mojo::PendingRemote<network::mojom::URLLoaderFactory>
-CreateWorkerProtocolURLLoaderFactory(
-    scoped_refptr<WorkerProtocolEndpoint> endpoint);
+CreateWorkerProtocolURLLoaderFactory(scoped_refptr<WorkerProtocolSlot> slot);
 
 }  // namespace electron
 

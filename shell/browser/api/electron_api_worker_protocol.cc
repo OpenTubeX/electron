@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "gin/converter.h"
 #include "gin/dictionary.h"
 #include "net/base/net_errors.h"
+#include "shell/browser/browser.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/net/worker_protocol.h"
 #include "shell/browser/protocol_registry.h"
@@ -141,10 +143,12 @@ class WorkerProtocolBinding : public WorkerProtocolEndpoint::Delegate {
  private:
   ~WorkerProtocolBinding() override = default;
 
-  v8::Local<v8::Promise> Register(const std::string& partition,
-                                  const std::string& scheme) {
+  v8::Local<v8::Value> Register(const std::string& partition,
+                                const std::string& scheme) {
     v8::Local<v8::Context> context = context_.Get(isolate_);
-    auto resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
+    v8::Local<v8::Promise::Resolver> resolver;
+    if (!v8::Promise::Resolver::New(context).ToLocal(&resolver))
+      return v8::Undefined(isolate_);
     const uint64_t token = ++next_token_;
     resolvers_[token].Reset(isolate_, resolver);
     pending_[token] = {scheme, partition};
@@ -155,15 +159,24 @@ class WorkerProtocolBinding : public WorkerProtocolEndpoint::Delegate {
             [](scoped_refptr<WorkerProtocolEndpoint> endpoint,
                std::string partition, std::string scheme, uint64_t token,
                WorkerProtocolBinding* self) {
-              // Only the default session for now; `partition` is plumbed for
-              // a session option later.
-              auto* context =
-                  electron::ElectronBrowserContext::From(partition, false);
-              bool ok = context->protocol_registry()->RegisterWorkerProtocol(
-                  scheme, endpoint);
+              std::string error;
+              if (!electron::Browser::Get()->is_ready()) {
+                error = "protocol.handle() cannot be used before app is ready";
+              } else if (electron::ProtocolRegistry::IsBuiltinScheme(scheme)) {
+                error = "Built-in scheme " + scheme +
+                        " cannot be handled from a worker thread";
+              } else {
+                // Only the default session for now; `partition` is plumbed
+                // for a session option later.
+                auto* registry =
+                    electron::ElectronBrowserContext::From(partition, false)
+                        ->protocol_registry();
+                if (!registry->RegisterWorkerProtocol(scheme, endpoint))
+                  error = "Scheme " + scheme + " is already handled";
+              }
               endpoint->PostToWorker(base::BindOnce(
                   &WorkerProtocolBinding::OnHandled, base::Unretained(self),
-                  token, scheme, partition, ok));
+                  token, scheme, partition, error));
             },
             endpoint_, partition, scheme, token, this));
     return resolver->GetPromise();
@@ -187,6 +200,8 @@ class WorkerProtocolBinding : public WorkerProtocolEndpoint::Delegate {
         FROM_HERE, base::BindOnce(
                        [](scoped_refptr<WorkerProtocolEndpoint> endpoint,
                           std::string partition, std::string scheme) {
+                         if (!electron::Browser::Get()->is_ready())
+                           return;
                          electron::ElectronBrowserContext::From(partition,
                                                                 false)
                              ->protocol_registry()
@@ -195,26 +210,32 @@ class WorkerProtocolBinding : public WorkerProtocolEndpoint::Delegate {
                        endpoint_, partition, scheme));
   }
 
+  // `error` is empty when the scheme was registered.
   void OnHandled(uint64_t token,
                  std::string scheme,
                  std::string partition,
-                 bool ok) {
+                 std::string error) {
+    if (isolate_->IsExecutionTerminating())
+      return;
     v8::HandleScope handle_scope(isolate_);
     v8::Local<v8::Context> context = context_.Get(isolate_);
     v8::Context::Scope context_scope(context);
     const bool wanted = pending_.erase(token) > 0;
-    if (ok && wanted)
-      schemes_[scheme] = partition;
-    else if (ok)
-      PostUnregister(partition, scheme);
-    ok = ok && wanted;
+    if (error.empty()) {
+      if (wanted) {
+        schemes_[scheme] = partition;
+      } else {
+        PostUnregister(partition, scheme);
+        error = "Scheme " + scheme + " was unhandled before it was registered";
+      }
+    }
     auto it = resolvers_.find(token);
     if (it == resolvers_.end())
       return;
     v8::Local<v8::Promise::Resolver> resolver = it->second.Get(isolate_);
     resolvers_.erase(it);
     UpdateKeepAlive();
-    resolver->Resolve(context, v8::Boolean::New(isolate_, ok)).ToChecked();
+    std::ignore = resolver->Resolve(context, gin::StringToV8(isolate_, error));
   }
 
   void UpdateKeepAlive() {

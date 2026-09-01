@@ -18,7 +18,6 @@
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/data_pipe_drainer.h"
 #include "mojo/public/cpp/system/data_pipe_producer.h"
-#include "mojo/public/cpp/system/string_data_source.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
@@ -77,6 +76,28 @@ std::unique_ptr<WorkerProtocolEndpoint::Request> MakeRequest(
 }
 
 }  // namespace
+
+// A response chunk on its way into the renderer's pipe; DataPipeProducer
+// reads it on its own sequence, possibly after the loader is gone.
+class OwnedStringDataSource : public mojo::DataPipeProducer::DataSource {
+ public:
+  explicit OwnedStringDataSource(std::string data) : data_(std::move(data)) {}
+  ~OwnedStringDataSource() override = default;
+
+  uint64_t GetLength() const override { return data_.size(); }
+  ReadResult Read(uint64_t offset, base::span<char> buffer) override {
+    ReadResult result;
+    if (offset <= data_.size()) {
+      const size_t n = std::min<uint64_t>(buffer.size(), data_.size() - offset);
+      buffer.first(n).copy_from(base::span(data_).subspan(offset, n));
+      result.bytes_read = n;
+    }
+    return result;
+  }
+
+ private:
+  const std::string data_;
+};
 
 // One request being answered by a worker: owns the renderer's URLLoader pipe
 // and client on the IO thread and feeds them from what the worker sends.
@@ -148,13 +169,16 @@ class WorkerProtocolLoader : public network::mojom::URLLoader {
         head->headers->IsRedirect(&location)) {
       redirect_info_ = net::RedirectInfo::ComputeRedirectInfo(
           request_.method, request_.url, request_.site_for_cookies,
-          net::RedirectInfo::FirstPartyURLPolicy::UPDATE_URL_ON_REDIRECT,
+          request_.update_first_party_url_on_redirect
+              ? net::RedirectInfo::FirstPartyURLPolicy::UPDATE_URL_ON_REDIRECT
+              : net::RedirectInfo::FirstPartyURLPolicy::NEVER_CHANGE_URL,
           request_.referrer_policy, request_.referrer.GetAsReferrer().spec(),
           request_.request_initiator, status, request_.url.Resolve(location),
           net::RedirectUtil::GetReferrerPolicyHeader(head->headers.get()),
           /*insecure_scheme_was_upgraded=*/false);
       // Navigations and net.fetch start over with a new loader; a renderer
-      // subresource request calls FollowRedirect() on this one.
+      // subresource request calls FollowRedirect() on this one under a new id.
+      endpoint_->ForgetLoader(id_);
       client_->OnReceiveRedirect(*redirect_info_, std::move(head));
       return;
     }
@@ -219,19 +243,19 @@ class WorkerProtocolLoader : public network::mojom::URLLoader {
     if (writing_ || queue_.empty() || !producer_)
       return;
     writing_ = true;
-    in_flight_ = std::move(queue_.front());
+    in_flight_size_ = queue_.front().size();
+    // The producer reads on its own sequence and can outlive this loader, so
+    // the source owns the bytes.
+    producer_->Write(
+        std::make_unique<OwnedStringDataSource>(std::move(queue_.front())),
+        base::BindOnce(&WorkerProtocolLoader::DidWrite,
+                       weak_factory_.GetWeakPtr()));
     queue_.pop_front();
-    producer_->Write(std::make_unique<mojo::StringDataSource>(
-                         in_flight_, mojo::StringDataSource::AsyncWritingMode::
-                                         STRING_STAYS_VALID_UNTIL_COMPLETION),
-                     base::BindOnce(&WorkerProtocolLoader::DidWrite,
-                                    weak_factory_.GetWeakPtr()));
   }
 
   void DidWrite(MojoResult result) {
     writing_ = false;
-    bytes_written_ += in_flight_.size();
-    in_flight_.clear();
+    bytes_written_ += in_flight_size_;
     if (result != MOJO_RESULT_OK) {
       Complete(net::ERR_FAILED);
       return;
@@ -280,7 +304,7 @@ class WorkerProtocolLoader : public network::mojom::URLLoader {
   mojo::Remote<network::mojom::URLLoaderClient> client_;
   std::unique_ptr<mojo::DataPipeProducer> producer_;
   std::deque<std::string> queue_;
-  std::string in_flight_;
+  size_t in_flight_size_ = 0;
   uint64_t bytes_written_ = 0;
   bool head_sent_ = false;
   bool writing_ = false;
@@ -373,6 +397,11 @@ class BodyReader : public mojo::DataPipeDrainer::Client {
   // mojo::DataPipeDrainer::Client:
   void OnDataAvailable(base::span<const uint8_t> data) override {
     Append(base::as_string_view(data));
+    if (too_large_) {
+      // Closing the getters ends the pipe; OnDataComplete() then finishes.
+      data_pipe_getter_.reset();
+      chunked_getter_.reset();
+    }
   }
   void Append(std::string_view bytes) {
     if (too_large_ || data_.size() + bytes.size() > kMaxRequestBodyBytes) {
@@ -401,11 +430,11 @@ class WorkerProtocolURLLoaderFactory
     : public network::SelfDeletingURLLoaderFactory {
  public:
   WorkerProtocolURLLoaderFactory(
-      scoped_refptr<WorkerProtocolEndpoint> endpoint,
+      scoped_refptr<WorkerProtocolSlot> slot,
       mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver,
       base::SelfDeletingPassKey key)
       : network::SelfDeletingURLLoaderFactory(std::move(receiver), key),
-        endpoint_(std::move(endpoint)) {}
+        slot_(std::move(slot)) {}
 
   void CreateLoaderAndStart(
       mojo::PendingReceiver<network::mojom::URLLoader> loader,
@@ -428,9 +457,15 @@ class WorkerProtocolURLLoaderFactory
                   network::mojom::CorsError::kCorsDisabledScheme)));
       return;
     }
+    scoped_refptr<WorkerProtocolEndpoint> endpoint = slot_->Get();
+    if (!endpoint) {
+      mojo::Remote<network::mojom::URLLoaderClient>(std::move(client))
+          ->OnComplete(network::URLLoaderCompletionStatus(net::ERR_FAILED));
+      return;
+    }
     // Self-owned; deletes itself when the request completes or is dropped.
     auto* in_flight =
-        new WorkerProtocolLoader(endpoint_, NextRequestId(), request,
+        new WorkerProtocolLoader(std::move(endpoint), NextRequestId(), request,
                                  std::move(loader), std::move(client));
     BodyReader::Read(request.request_body,
                      base::BindOnce(
@@ -449,7 +484,7 @@ class WorkerProtocolURLLoaderFactory
  private:
   ~WorkerProtocolURLLoaderFactory() override = default;
 
-  const scoped_refptr<WorkerProtocolEndpoint> endpoint_;
+  const scoped_refptr<WorkerProtocolSlot> slot_;
 };
 
 }  // namespace
@@ -555,6 +590,11 @@ void WorkerProtocolEndpoint::QueueRequest(
   Post(Event{Event::Kind::kRequest, id, std::move(request)});
 }
 
+void WorkerProtocolEndpoint::ForgetLoader(uint64_t id) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  loaders_.erase(id);
+}
+
 void WorkerProtocolEndpoint::QueueCancel(uint64_t id) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
   loaders_.erase(id);
@@ -622,19 +662,31 @@ void WorkerProtocolEndpoint::Finish(uint64_t id, int net_error) {
           scoped_refptr<WorkerProtocolEndpoint>(this), id, net_error));
 }
 
+WorkerProtocolSlot::WorkerProtocolSlot() = default;
+WorkerProtocolSlot::~WorkerProtocolSlot() = default;
+
+scoped_refptr<WorkerProtocolEndpoint> WorkerProtocolSlot::Get() const {
+  base::AutoLock lock(lock_);
+  return endpoint_;
+}
+
+void WorkerProtocolSlot::Set(scoped_refptr<WorkerProtocolEndpoint> endpoint) {
+  base::AutoLock lock(lock_);
+  endpoint_ = std::move(endpoint);
+}
+
 mojo::PendingRemote<network::mojom::URLLoaderFactory>
-CreateWorkerProtocolURLLoaderFactory(
-    scoped_refptr<WorkerProtocolEndpoint> endpoint) {
+CreateWorkerProtocolURLLoaderFactory(scoped_refptr<WorkerProtocolSlot> slot) {
   mojo::PendingRemote<network::mojom::URLLoaderFactory> remote;
   IOThread()->PostTask(
       FROM_HERE,
       base::BindOnce(
-          [](scoped_refptr<WorkerProtocolEndpoint> endpoint,
+          [](scoped_refptr<WorkerProtocolSlot> slot,
              mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver) {
             base::MakeSelfDeleting<WorkerProtocolURLLoaderFactory>(
-                std::move(endpoint), std::move(receiver));
+                std::move(slot), std::move(receiver));
           },  // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
-          std::move(endpoint), remote.InitWithNewPipeAndPassReceiver()));
+          std::move(slot), remote.InitWithNewPipeAndPassReceiver()));
   return remote;
 }
 

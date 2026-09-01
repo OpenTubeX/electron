@@ -4,12 +4,15 @@
 
 #include "shell/browser/protocol_registry.h"
 
+#include <algorithm>
+
 #include <utility>
 
 #include "electron/fuses.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/net/asar/asar_url_loader_factory.h"
 #include "shell/browser/net/worker_protocol.h"
+#include "url/url_constants.h"
 
 namespace electron {
 
@@ -46,8 +49,10 @@ void ProtocolRegistry::RegisterURLLoaderFactories(
 
   for (const auto& it : handlers_)
     factories->emplace(it.first, CreateRegisteredFactory(it.first));
-  for (const auto& it : worker_handlers_)
-    factories->emplace(it.first, CreateRegisteredFactory(it.first));
+  for (const auto& it : worker_handlers_) {
+    if (it.second->Get())
+      factories->emplace(it.first, CreateRegisteredFactory(it.first));
+  }
 }
 
 mojo::PendingRemote<network::mojom::URLLoaderFactory>
@@ -69,38 +74,69 @@ ProtocolRegistry::CreateRegisteredFactory(std::string_view scheme) const {
     return ElectronURLLoaderFactory::Create(it->second.first, it->second.second,
                                             browser_context_->GetWeakPtr());
   }
-  if (auto it = worker_handlers_.find(scheme); it != worker_handlers_.end())
+  if (auto it = worker_handlers_.find(scheme);
+      it != worker_handlers_.end() && it->second->Get()) {
     return CreateWorkerProtocolURLLoaderFactory(it->second);
+  }
   return {};
+}
+
+// static
+bool ProtocolRegistry::IsBuiltinScheme(std::string_view scheme) {
+  static constexpr std::string_view kSchemes[] = {url::kAboutScheme,
+                                                  url::kBlobScheme,
+                                                  url::kDataScheme,
+                                                  url::kFileScheme,
+                                                  url::kFileSystemScheme,
+                                                  url::kHttpScheme,
+                                                  url::kHttpsScheme,
+                                                  url::kJavaScriptScheme,
+                                                  url::kWsScheme,
+                                                  url::kWssScheme,
+                                                  "chrome",
+                                                  "chrome-extension",
+                                                  "chrome-untrusted",
+                                                  "devtools"};
+  return std::ranges::contains(kSchemes, scheme);
 }
 
 bool ProtocolRegistry::RegisterWorkerProtocol(
     const std::string& scheme,
     scoped_refptr<WorkerProtocolEndpoint> endpoint) {
-  if (handlers_.contains(scheme))
+  if (IsBuiltinScheme(scheme) || handlers_.contains(scheme))
     return false;
-  return worker_handlers_.try_emplace(scheme, std::move(endpoint)).second;
+  auto& slot = worker_handlers_[scheme];
+  if (!slot)
+    slot = base::MakeRefCounted<WorkerProtocolSlot>();
+  if (slot->Get())
+    return false;
+  slot->Set(std::move(endpoint));
+  return true;
 }
 
 bool ProtocolRegistry::UnregisterWorkerProtocol(
     const std::string& scheme,
     WorkerProtocolEndpoint* endpoint) {
   auto it = worker_handlers_.find(scheme);
-  if (it == worker_handlers_.end() || it->second.get() != endpoint)
+  if (it == worker_handlers_.end() || it->second->Get().get() != endpoint)
     return false;
-  worker_handlers_.erase(it);
+  it->second->Set(nullptr);
   return true;
 }
 
+bool ProtocolRegistry::IsWorkerRegistered(std::string_view scheme) const {
+  auto it = worker_handlers_.find(scheme);
+  return it != worker_handlers_.end() && it->second->Get();
+}
+
 bool ProtocolRegistry::IsRegistered(std::string_view scheme) const {
-  return FindRegistered(scheme) != nullptr ||
-         worker_handlers_.find(scheme) != worker_handlers_.end();
+  return FindRegistered(scheme) != nullptr || IsWorkerRegistered(scheme);
 }
 
 bool ProtocolRegistry::RegisterProtocol(ProtocolType type,
                                         const std::string& scheme,
                                         const ProtocolHandler& handler) {
-  if (worker_handlers_.contains(scheme))
+  if (IsWorkerRegistered(scheme))
     return false;
   return handlers_.try_emplace(scheme, type, handler).second;
 }

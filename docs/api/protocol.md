@@ -107,16 +107,18 @@ main()
 ```
 
 In a worker thread `protocol.handle()` returns a `Promise` that resolves once
-the scheme is registered, and rejects if the main thread or another worker
-already handles it. A worker that handles a scheme stays alive until it calls
-`protocol.unhandle()` or is terminated, at which point the scheme is released.
-The scheme must still be registered with `protocol.registerSchemesAsPrivileged`
-in the main process before the `ready` event, `webRequest` listeners in the
-main process apply to these requests as to any other, and `net.fetch` is not
-available inside the worker, so a handler answers from its own resources
-(files, memory, its own network client) rather than by forwarding the request.
-Intercepting a built-in scheme such as `https` or `file` from a worker is not
-supported.
+the scheme is registered, and rejects if the app is not ready yet, if the
+scheme is a built-in one such as `https` or `file`, or if the main thread or
+another worker already handles it; `protocol.isProtocolHandled()` there reports
+the schemes that worker handles. A worker that handles a scheme stays alive
+until it calls `protocol.unhandle()` or is terminated, at which point the scheme
+is released; another worker (or the main thread) can then handle it, and pages
+that were already open are served by the new handler. The scheme must still be
+registered with `protocol.registerSchemesAsPrivileged` in the main process
+before the `ready` event, `webRequest` listeners in the main process apply to
+these requests as to any other, and `net.fetch` is not available inside the
+worker, so a handler answers from its own resources (files, memory, its own
+network client) rather than by forwarding the request.
 
 ## Protocol names
 

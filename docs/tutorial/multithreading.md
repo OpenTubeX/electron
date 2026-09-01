@@ -28,9 +28,10 @@ The `nodeIntegrationInWorker` can be used independent of `nodeIntegration`, but
 The main process, utility processes and renderers with Node.js integration can
 create Node.js [worker threads](https://nodejs.org/api/worker_threads.html)
 with `require('node:worker_threads')`. Inside such a thread `process.type` is
-`'worker-thread'`, `asar` archives can be read with Node.js APIs, and
-`require('electron')` provides the [`protocol`](../api/protocol.md#handling-a-protocol-in-a-worker-thread)
-module, so a custom protocol can be served without involving the main thread.
+`'worker-thread'` and `asar` archives can be read with Node.js APIs. In worker
+threads of the main process, `require('electron')` also provides the
+[`protocol`](../api/protocol.md#handling-a-protocol-in-a-worker-thread) module,
+so a custom protocol can be served without involving the main thread.
 
 ## Available APIs
 
