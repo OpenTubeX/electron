@@ -139,7 +139,7 @@ class WorkerProtocolLoader : public network::mojom::URLLoader {
     }
     head->headers->GetMimeTypeAndCharset(&head->mime_type, &head->charset);
     if (head->mime_type.empty())
-      head->mime_type = "text/plain";
+      head->mime_type = "text/html";
     if (auto length = head->headers->GetContentLength())
       head->content_length = length->InBytes();
 

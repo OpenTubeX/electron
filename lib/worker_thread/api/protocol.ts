@@ -26,6 +26,7 @@ interface InFlight {
   sent: number;
   written: number;
   resume?: () => void;
+  reader?: ReadableStreamDefaultReader<Uint8Array>;
 }
 
 // net::ERR_FAILED / net::ERR_ABORTED
@@ -43,7 +44,6 @@ async function serve(id: number, incoming: IncomingRequest) {
   const controller = new AbortController();
   const state: InFlight = { controller, sent: 0, written: 0 };
   inFlight.set(id, state);
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     if (!handler) throw new Error(`No handler for ${incoming.scheme}`);
     const headers = new Headers(incoming.headers);
@@ -63,8 +63,10 @@ async function serve(id: number, incoming: IncomingRequest) {
     const isRedirect = REDIRECT_STATUSES.has(response.status) && response.headers.has('location');
     const hasBody = response.body !== null && request.method !== 'HEAD' && !isRedirect;
     binding!.respond(id, response.status, response.statusText, [...response.headers], hasBody);
-    if (hasBody) {
-      reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    if (!hasBody) {
+      response.body?.cancel().catch(() => {});
+    } else {
+      const reader = (state.reader = (response.body as ReadableStream<Uint8Array>).getReader());
       while (true) {
         if (controller.signal.aborted) throw controller.signal.reason;
         const { done, value } = await reader.read();
@@ -81,7 +83,7 @@ async function serve(id: number, incoming: IncomingRequest) {
     binding!.finish(id, 0);
   } catch {
     binding!.finish(id, controller.signal.aborted ? ERR_ABORTED : ERR_FAILED);
-    reader?.cancel().catch(() => {});
+    state.reader?.cancel().catch(() => {});
   } finally {
     inFlight.delete(id);
   }
@@ -95,6 +97,7 @@ binding?.setCallbacks(
     const state = inFlight.get(id);
     if (!state) return;
     state.controller.abort();
+    state.reader?.cancel(state.controller.signal.reason).catch(() => {});
     state.resume?.();
   },
   (id: number, written: number) => {
@@ -118,7 +121,7 @@ export async function handle(scheme: string, handler: Handler) {
   handlers.set(scheme, handler);
   const ok = await binding.handle('', scheme);
   if (!ok) {
-    handlers.delete(scheme);
+    if (handlers.get(scheme) === handler) handlers.delete(scheme);
     throw new Error(`Failed to register protocol: ${scheme} is already handled`);
   }
 }

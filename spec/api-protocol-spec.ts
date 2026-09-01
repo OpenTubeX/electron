@@ -1102,6 +1102,36 @@ describe('protocol module', () => {
       expect(aborted).to.equal(true);
     });
 
+    it('cancels a body stream that is still producing when the request is cancelled', async () => {
+      await startWorker(`
+        globalThis.cancelled = new Promise((resolve) => {
+          protocol.handle('http-like', () => new Response(new ReadableStream({
+            pull (controller) { return new Promise((r) => setTimeout(r, 50)).then(() => controller.enqueue(new Uint8Array(1024))); },
+            cancel () { resolve(true); }
+          })));
+        });
+        parentPort.on('message', async (m) => { if (m === 'cancelled?') parentPort.postMessage(await Promise.race([globalThis.cancelled, new Promise((r) => setTimeout(() => r(false), 2000))])); });
+      `);
+      const controller = new AbortController();
+      const response = await net.fetch('http-like://host/endless', { signal: controller.signal });
+      const reader = response.body!.getReader();
+      await reader.read();
+      controller.abort();
+      await reader.read().catch(() => {});
+      worker.postMessage('cancelled?');
+      const [cancelled] = await once(worker, 'message');
+      expect(cancelled).to.equal(true);
+    });
+
+    it('serves a body without a content-type as text/html, like the main thread does', async () => {
+      await startWorker("await protocol.handle('http-like', () => new Response(Buffer.from('<p id=x>hi</p>')));");
+      const w = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      await w.loadURL('http-like://host/');
+      expect(
+        await w.webContents.executeJavaScript("document.contentType + ':' + !!document.getElementById('x')")
+      ).to.equal('text/html:true');
+    });
+
     it('refuses a scheme the main thread already handles and releases it on unhandle or exit', async () => {
       protocol.handle('http-like', () => new Response('main'));
       try {
