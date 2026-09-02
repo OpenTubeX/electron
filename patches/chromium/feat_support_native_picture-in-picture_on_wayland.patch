@@ -1,0 +1,1515 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: D3SOX <nico@d3sox.me>
+Date: Wed, 2 Sep 2026 23:30:44 +0200
+Subject: feat: support native picture-in-picture on Wayland
+
+Use the experimental xx-pip-v1 compositor role when it is advertised, while retaining the existing xdg_toplevel fallback elsewhere. This gives video and Document Picture-in-Picture windows compositor-native stacking and decoration behavior on supported Wayland compositors.
+
+This patch is temporary until the protocol stabilizes and equivalent support can be upstreamed to Chromium.
+
+diff --git a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+index 0184f8ad4e5e4a764c6e3d22c7e53793026c8479..958e7d6ea2a8b16493055fa3c524233b01589db8 100644
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -377,6 +377,7 @@ std::unique_ptr<VideoOverlayWindowViews> VideoOverlayWindowViews::Create(
+   // Just to have any non-empty bounds as required by Init(). The window is
+   // resized to fit the video that is embedded right afterwards, anyway.
+   params.bounds = gfx::Rect(overlay_window->GetMinimumSize());
++  params.is_picture_in_picture = true;
+   params.z_order = ui::ZOrderLevel::kFloatingWindow;
+   params.visible_on_all_workspaces = true;
+   params.remove_standard_frame = true;
+diff --git a/chrome/browser/ui/views/picture_in_picture/document_pip_host.cc b/chrome/browser/ui/views/picture_in_picture/document_pip_host.cc
+index 6694242d349d810a464085bc9b1f1766c97f8a73..308cc4e9eaf566c1be54fc6b9fb174925fbc5fb3 100644
+--- a/chrome/browser/ui/views/picture_in_picture/document_pip_host.cc
++++ b/chrome/browser/ui/views/picture_in_picture/document_pip_host.cc
+@@ -45,6 +45,7 @@ void DocumentPipHost::CreatePipWidget(
+   // `widget_delegate_` because we use CLIENT_OWNS_WIDGET without
+   // SetOwnedByWidget(); the Widget will not delete the delegate.
+   params.delegate = widget_delegate_.get();
++  params.is_picture_in_picture = true;
+   params.z_order = ui::ZOrderLevel::kFloatingWindow;
+   params.visible_on_all_workspaces = true;
+   params.remove_standard_frame = true;
+diff --git a/ui/ozone/platform/wayland/BUILD.gn b/ui/ozone/platform/wayland/BUILD.gn
+index 8e2d3051633ac3560071bfe7beba6007851d8c92..2fdacbefe6edf2dcb7c78759a08b2b5e242ab257 100644
+--- a/ui/ozone/platform/wayland/BUILD.gn
++++ b/ui/ozone/platform/wayland/BUILD.gn
+@@ -7,10 +7,15 @@ visibility = [ "//ui/ozone/*" ]
+ import("//build/config/linux/pkg_config.gni")
+ import("//gpu/vulkan/features.gni")
+ import("//testing/libfuzzer/fuzzer_test.gni")
++import("//third_party/wayland/wayland_protocol.gni")
+ import("//ui/ozone/platform/wayland/wayland.gni")
+ 
+ assert(is_linux)
+ 
++wayland_protocol("xx_pip_protocol") {
++  sources = [ "protocols/xx-pip-v1.xml" ]
++}
++
+ source_set("common") {
+   sources = [
+     "common/wayland_overlay_config.cc",
+@@ -210,6 +215,8 @@ source_set("wayland") {
+     "host/xdg_surface.h",
+     "host/xdg_toplevel.cc",
+     "host/xdg_toplevel.h",
++    "host/xx_pip.cc",
++    "host/xx_pip.h",
+     "host/zwp_idle_inhibit_manager.cc",
+     "host/zwp_idle_inhibit_manager.h",
+     "host/zwp_primary_selection_device.cc",
+@@ -237,6 +244,7 @@ source_set("wayland") {
+ 
+   deps = [
+     ":common",
++    ":xx_pip_protocol",
+     "//base",
+     "//build/config/linux/dbus:buildflags",
+     "//build/config/linux/libdrm",
+@@ -405,6 +413,8 @@ source_set("test_support") {
+     "test/mock_xdg_surface.h",
+     "test/mock_xdg_toplevel_icon.cc",
+     "test/mock_xdg_toplevel_icon.h",
++    "test/mock_xx_pip.cc",
++    "test/mock_xx_pip.h",
+     "test/mock_zwp_linux_dmabuf.cc",
+     "test/mock_zwp_linux_dmabuf.h",
+     "test/mock_zwp_text_input.cc",
+@@ -499,6 +509,7 @@ source_set("test_support") {
+   ]
+ 
+   public_deps = [
++    ":xx_pip_protocol",
+     "//components/exo/wayland/protocol:overlay_prioritizer_protocol",
+     "//skia",
+     "//testing/gmock",
+diff --git a/ui/ozone/platform/wayland/common/wayland_object.cc b/ui/ozone/platform/wayland/common/wayland_object.cc
+index e29910a05b209a988a3bdd87ccfca621c68e4b21..0818babb19f5227c7950a6fbc53ba2cc28ccb282 100644
+--- a/ui/ozone/platform/wayland/common/wayland_object.cc
++++ b/ui/ozone/platform/wayland/common/wayland_object.cc
+@@ -41,6 +41,7 @@
+ #include <xdg-shell-client-protocol.h>
+ #include <xdg-toplevel-drag-v1-client-protocol.h>
+ #include <xdg-toplevel-icon-v1-client-protocol.h>
++#include <xx-pip-v1-client-protocol.h>
+ #include <xx-session-management-v1-client-protocol.h>
+ 
+ #include "base/logging.h"
+@@ -206,6 +207,8 @@ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xdg_toplevel_drag_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xdg_toplevel_icon_manager_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xdg_toplevel_icon_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xdg_wm_base)
++IMPLEMENT_WAYLAND_OBJECT_TRAITS(xx_pip_shell_v1)
++IMPLEMENT_WAYLAND_OBJECT_TRAITS(xx_pip_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xx_session_manager_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xx_session_v1)
+ IMPLEMENT_WAYLAND_OBJECT_TRAITS(xx_toplevel_session_v1)
+diff --git a/ui/ozone/platform/wayland/common/wayland_object.h b/ui/ozone/platform/wayland/common/wayland_object.h
+index dd46b63c0e63e847eba90dc355c5ee8641287682..d6e5e7c07971de557bab0b124de5526e01e41234 100644
+--- a/ui/ozone/platform/wayland/common/wayland_object.h
++++ b/ui/ozone/platform/wayland/common/wayland_object.h
+@@ -168,6 +168,8 @@ DECLARE_WAYLAND_OBJECT_TRAITS(xdg_toplevel_drag_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(xdg_toplevel_icon_manager_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(xdg_toplevel_icon_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(xdg_wm_base)
++DECLARE_WAYLAND_OBJECT_TRAITS(xx_pip_shell_v1)
++DECLARE_WAYLAND_OBJECT_TRAITS(xx_pip_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(xx_session_manager_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(xx_session_v1)
+ DECLARE_WAYLAND_OBJECT_TRAITS(xx_toplevel_session_v1)
+diff --git a/ui/ozone/platform/wayland/host/wayland_connection.cc b/ui/ozone/platform/wayland/host/wayland_connection.cc
+index 224f6abfe06794d31fc4d876c8242dab79ba075d..f33b0f22901853689680ecf6b3a059552f7724b6 100644
+--- a/ui/ozone/platform/wayland/host/wayland_connection.cc
++++ b/ui/ozone/platform/wayland/host/wayland_connection.cc
+@@ -65,6 +65,7 @@
+ #include "ui/ozone/platform/wayland/host/xdg_activation.h"
+ #include "ui/ozone/platform/wayland/host/xdg_foreign_wrapper.h"
+ #include "ui/ozone/platform/wayland/host/xdg_session_manager.h"
++#include "ui/ozone/platform/wayland/host/xx_pip.h"
+ #include "ui/ozone/platform/wayland/host/zwp_idle_inhibit_manager.h"
+ #include "ui/ozone/platform/wayland/host/zwp_primary_selection_device_manager.h"
+ #include "ui/ozone/platform/wayland/host/zwp_text_input_v1.h"
+@@ -184,6 +185,8 @@ bool WaylandConnection::Initialize(bool use_threaded_polling) {
+                               &WaylandZwpPointerGestures::Instantiate);
+   RegisterGlobalObjectFactory(WaylandZwpRelativePointerManager::kInterfaceName,
+                               &WaylandZwpRelativePointerManager::Instantiate);
++  RegisterGlobalObjectFactory(XxPipShell::kInterfaceName,
++                              &XxPipShell::Instantiate);
+   RegisterGlobalObjectFactory(XdgActivation::kInterfaceName,
+                               &XdgActivation::Instantiate);
+   RegisterGlobalObjectFactory(XdgForeignWrapper::kInterfaceNameV1,
+diff --git a/ui/ozone/platform/wayland/host/wayland_connection.h b/ui/ozone/platform/wayland/host/wayland_connection.h
+index 241a1e5ae9c5c176d8424b08d6f691f2e9fa94b3..c06234955601a90fb8d858c7bb4c5d2f75c0e376 100644
+--- a/ui/ozone/platform/wayland/host/wayland_connection.h
++++ b/ui/ozone/platform/wayland/host/wayland_connection.h
+@@ -25,6 +25,7 @@ class SkBitmap;
+ 
+ struct wl_cursor;
+ struct wl_event_queue;
++struct xx_pip_shell_v1;
+ 
+ namespace gfx {
+ class Point;
+@@ -66,6 +67,7 @@ class WaylandZwpRelativePointerManager;
+ class XdgActivation;
+ class XdgForeignWrapper;
+ class XdgSessionManager;
++class XxPipShell;
+ class ZwpIdleInhibitManager;
+ class ZwpPrimarySelectionDeviceManager;
+ class ZwpTextInputV1;
+@@ -141,6 +143,10 @@ class WaylandConnection {
+     return toplevel_icon_manager_v1_.get();
+   }
+ 
++  ::xx_pip_shell_v1* xx_pip_shell_v1() const {
++    return xx_pip_shell_v1_.get();
++  }
++
+   void SetPlatformCursor(wl_cursor* cursor_data, int buffer_scale);
+ 
+   void SetCursorBufferListener(WaylandCursorBufferListener* listener);
+@@ -330,6 +336,7 @@ class WaylandConnection {
+   friend class WaylandZwpRelativePointerManager;
+   friend class WaylandCursorShape;
+   friend class WaylandWpColorManager;
++  friend class XxPipShell;
+   friend class XdgActivation;
+   friend class XdgForeignWrapper;
+   friend class XdgSessionManager;
+@@ -428,6 +435,7 @@ class WaylandConnection {
+   wl::Object<zxdg_output_manager_v1> xdg_output_manager_;
+   wl::Object<wp_fractional_scale_manager_v1> fractional_scale_manager_v1_;
+   wl::Object<xdg_toplevel_icon_manager_v1> toplevel_icon_manager_v1_;
++  wl::Object<::xx_pip_shell_v1> xx_pip_shell_v1_;
+ 
+   // Manages Wayland windows.
+   WaylandWindowManager window_manager_{this};
+diff --git a/ui/ozone/platform/wayland/host/wayland_toplevel_window.cc b/ui/ozone/platform/wayland/host/wayland_toplevel_window.cc
+index 36529f5055dad8ed42f438f2b7c6d6d7560539a6..ee28602bc288e880cb68785fbb2611e534a77962 100644
+--- a/ui/ozone/platform/wayland/host/wayland_toplevel_window.cc
++++ b/ui/ozone/platform/wayland/host/wayland_toplevel_window.cc
+@@ -38,6 +38,7 @@
+ #include "ui/ozone/platform/wayland/host/xdg_session.h"
+ #include "ui/ozone/platform/wayland/host/xdg_surface.h"
+ #include "ui/ozone/platform/wayland/host/xdg_toplevel.h"
++#include "ui/ozone/platform/wayland/host/xx_pip.h"
+ #include "ui/platform_window/common/platform_window_defaults.h"
+ #include "ui/platform_window/extensions/wayland_extension.h"
+ #include "ui/platform_window/platform_window_delegate.h"
+@@ -67,35 +68,47 @@ WaylandToplevelWindow::~WaylandToplevelWindow() = default;
+ bool WaylandToplevelWindow::CreateXdgToplevel() {
+   if (auto xdg_surface = std::make_unique<XdgSurface>(this, connection())) {
+     if (xdg_surface->Initialize()) {
+-      auto xdg_toplevel = std::make_unique<XdgToplevel>(std::move(xdg_surface));
+-      if (xdg_toplevel && xdg_toplevel->Initialize()) {
+-        xdg_toplevel_ = std::move(xdg_toplevel);
++      if (use_xx_pip_) {
++        auto xx_pip = std::make_unique<XxPip>(std::move(xdg_surface));
++        if (xx_pip->Initialize(connection()->xx_pip_shell_v1())) {
++          xx_pip_ = std::move(xx_pip);
++        }
++      } else {
++        auto xdg_toplevel =
++            std::make_unique<XdgToplevel>(std::move(xdg_surface));
++        if (xdg_toplevel->Initialize()) {
++          xdg_toplevel_ = std::move(xdg_toplevel);
++        }
+       }
+     }
+   }
+-  if (!xdg_toplevel_) {
+-    LOG(ERROR) << "Failed to create a XdgToplevel.";
++  if (!HasShellRole()) {
++    LOG(ERROR) << "Failed to create a Wayland shell role.";
+     return false;
+   }
+ 
+-  xdg_toplevel_->SetAppId(app_id_);
+-  xdg_toplevel_->SetTitle(window_title_);
+-  SetSizeConstraints();
+-  TriggerStateChanges(GetPlatformWindowState());
+-  SetUpShellIntegration();
+-  OnDecorationModeChanged();
++  if (xx_pip_) {
++    xx_pip_->SetAppId(app_id_);
++  } else {
++    xdg_toplevel_->SetAppId(app_id_);
++    xdg_toplevel_->SetTitle(window_title_);
++    SetSizeConstraints();
++    TriggerStateChanges(GetPlatformWindowState());
++    SetUpShellIntegration();
++    OnDecorationModeChanged();
++  }
+ 
+   // If session management is supported and session data was passed in at
+   // construction time, with a valid `restore_id`, restoring this toplevel
+   // must be done now, before the first wl_surface commit. The remaining
+   // handling steps are done when the first xdg_surface.configure comes in
+   // (see HandleToplevelConfigure and UpdateSessionStateIfNeeded).
+-  if (session_ && session_data_->restore_id) {
++  if (xdg_toplevel_ && session_ && session_data_->restore_id) {
+     toplevel_session_ = session_->TrackToplevel(
+         this, session_data_->restore_id.value(), XdgSession::Action::kRestore);
+   }
+ 
+-  if (!initial_icon_.isNull()) {
++  if (xdg_toplevel_ && !initial_icon_.isNull()) {
+     SetWindowIcons(gfx::ImageSkia(), initial_icon_);
+     initial_icon_ = gfx::ImageSkia();
+   }
+@@ -108,15 +121,28 @@ bool WaylandToplevelWindow::CreateXdgToplevel() {
+   return true;
+ }
+ 
++bool WaylandToplevelWindow::HasShellRole() const {
++  return xdg_toplevel_ || xx_pip_;
++}
++
+ void WaylandToplevelWindow::DispatchHostWindowDragMovement(
+     int hittest,
+     const gfx::Point& pointer_location_in_px) {
+-  DCHECK(xdg_toplevel_);
++  DCHECK(HasShellRole());
+ 
+-  if (hittest == HTCAPTION)
+-    xdg_toplevel_->SurfaceMove(connection());
+-  else
+-    xdg_toplevel_->SurfaceResize(connection(), hittest);
++  if (hittest == HTCAPTION) {
++    if (xx_pip_) {
++      xx_pip_->SurfaceMove(connection());
++    } else {
++      xdg_toplevel_->SurfaceMove(connection());
++    }
++  } else {
++    if (xx_pip_) {
++      xx_pip_->SurfaceResize(connection(), hittest);
++    } else {
++      xdg_toplevel_->SurfaceResize(connection(), hittest);
++    }
++  }
+ 
+   connection()->Flush();
+   // TODO(crbug.com/40917147): Revisit to resolve the correct impl.
+@@ -125,7 +151,7 @@ void WaylandToplevelWindow::DispatchHostWindowDragMovement(
+ }
+ 
+ void WaylandToplevelWindow::Show(bool inactive) {
+-  if (xdg_toplevel_) {
++  if (HasShellRole()) {
+     return;
+   }
+ 
+@@ -146,7 +172,7 @@ void WaylandToplevelWindow::Show(bool inactive) {
+ }
+ 
+ void WaylandToplevelWindow::Hide() {
+-  if (!xdg_toplevel_) {
++  if (!HasShellRole()) {
+     return;
+   }
+ 
+@@ -170,6 +196,8 @@ void WaylandToplevelWindow::Hide() {
+   // makes sense only if the xdg_toplevel object is going to be reused, which is
+   // not the case here.
+   xdg_toplevel_.reset();
++  xx_pip_.reset();
++  picture_in_picture_configure_bounds_ = {};
+   toplevel_session_.reset();
+   appmenu_.reset();
+ 
+@@ -182,7 +210,7 @@ void WaylandToplevelWindow::Hide() {
+ bool WaylandToplevelWindow::IsVisible() const {
+   // X and Windows return true if the window is minimized. For consistency, do
+   // the same.
+-  return !!xdg_toplevel_;
++  return HasShellRole();
+ }
+ 
+ void WaylandToplevelWindow::SetTitle(const std::u16string& title) {
+@@ -199,6 +227,9 @@ void WaylandToplevelWindow::SetTitle(const std::u16string& title) {
+ 
+ void WaylandToplevelWindow::SetFullscreen(bool fullscreen,
+                                           int64_t target_display_id) {
++  if (xx_pip_) {
++    return;
++  }
+   // TODO(msisov, tonikitoo): add multiscreen support. As the documentation says
+   // if xdg_toplevel_set_fullscreen() is not provided with wl_output, it's up
+   // to the compositor to choose which display will be used to map this surface.
+@@ -234,6 +265,9 @@ void WaylandToplevelWindow::SetFullscreen(bool fullscreen,
+ }
+ 
+ void WaylandToplevelWindow::Maximize() {
++  if (xx_pip_) {
++    return;
++  }
+   SetWindowState(PlatformWindowState::kMaximized, display::kInvalidDisplayId);
+ }
+ 
+@@ -271,6 +305,9 @@ void WaylandToplevelWindow::Minimize() {
+ }
+ 
+ void WaylandToplevelWindow::Restore() {
++  if (xx_pip_) {
++    return;
++  }
+   DCHECK(xdg_toplevel_);
+ 
+   // Differently from other platforms, under Wayland, unmaximizing the dragged
+@@ -396,7 +433,8 @@ bool WaylandToplevelWindow::ShouldUseNativeFrame() const {
+   // This depends on availability of xdg-decoration protocol extension.
+   // Returns false if there is no xdg-decoration protocol extension provided
+   // even if use_native_frame_ is true.
+-  return use_native_frame_ && connection()->xdg_decoration_manager_v1();
++  return !xx_pip_ && use_native_frame_ &&
++         connection()->xdg_decoration_manager_v1();
+ }
+ 
+ bool WaylandToplevelWindow::ShouldUpdateWindowShape() const {
+@@ -603,6 +641,27 @@ void WaylandToplevelWindow::HandleToplevelConfigureWithOrigin(
+   }
+ }
+ 
++void WaylandToplevelWindow::HandlePictureInPictureConfigureBounds(
++    int32_t width,
++    int32_t height) {
++  picture_in_picture_configure_bounds_.SetSize(width, height);
++}
++
++gfx::Rect WaylandToplevelWindow::AdjustBoundsToCompositorConstraintsDIP(
++    const gfx::Rect& bounds_dip,
++    float ui_scale) const {
++  if (!xx_pip_ || picture_in_picture_configure_bounds_.IsEmpty()) {
++    return bounds_dip;
++  }
++
++  gfx::Rect adjusted_bounds = bounds_dip;
++  gfx::Size adjusted_size = bounds_dip.size();
++  adjusted_size.SetToMin(gfx::ScaleToFlooredSize(
++      picture_in_picture_configure_bounds_, 1.f / ui_scale));
++  adjusted_bounds.set_size(adjusted_size);
++  return adjusted_bounds;
++}
++
+ void WaylandToplevelWindow::SetOrigin(const gfx::Point& origin) {
+   gfx::Rect new_bounds(origin, GetBoundsInDIP().size());
+   WaylandWindow::SetBoundsInDIP(new_bounds);
+@@ -613,7 +672,7 @@ void WaylandToplevelWindow::HandleSurfaceConfigure(uint32_t serial) {
+ }
+ 
+ void WaylandToplevelWindow::OnSequencePoint(int64_t seq) {
+-  if (!xdg_toplevel_) {
++  if (!HasShellRole()) {
+     return;
+   }
+ 
+@@ -633,6 +692,8 @@ bool WaylandToplevelWindow::OnInitialize(
+   SetWorkspaceExtensionDelegate(properties.workspace_extension_delegate);
+ 
+   SetZOrderLevel(properties.z_order);
++  use_xx_pip_ =
++      properties.is_picture_in_picture && connection()->xx_pip_shell_v1();
+ 
+   if (!properties.workspace.empty()) {
+     int workspace;
+@@ -672,14 +733,17 @@ bool WaylandToplevelWindow::IsSuspended() const {
+ }
+ 
+ bool WaylandToplevelWindow::IsSurfaceConfigured() {
+-  return xdg_toplevel() ? xdg_toplevel()->IsConfigured() : false;
++  if (xx_pip_) {
++    return xx_pip_->IsConfigured();
++  }
++  return xdg_toplevel_ && xdg_toplevel_->IsConfigured();
+ }
+ 
+ void WaylandToplevelWindow::SetWindowGeometry(
+     const PlatformWindowDelegate::State& state) {
+   DCHECK(connection()->SupportsSetWindowGeometry());
+ 
+-  if (!xdg_toplevel_) {
++  if (!HasShellRole()) {
+     return;
+   }
+ 
+@@ -700,7 +764,11 @@ void WaylandToplevelWindow::SetWindowGeometry(
+       geometry_dip.set_height(1);
+     }
+   }
+-  xdg_toplevel_->SetWindowGeometry(geometry_dip);
++  if (xx_pip_) {
++    xx_pip_->SetWindowGeometry(geometry_dip);
++  } else {
++    xdg_toplevel_->SetWindowGeometry(geometry_dip);
++  }
+ }
+ 
+ void WaylandToplevelWindow::AckConfigure(uint32_t serial) {
+@@ -711,6 +779,8 @@ void WaylandToplevelWindow::AckConfigure(uint32_t serial) {
+   // details.
+   if (xdg_toplevel()) {
+     xdg_toplevel()->AckConfigure(serial);
++  } else if (xx_pip_) {
++    xx_pip_->AckConfigure(serial);
+   }
+ 
+   if (pending_configure_activation_token_.has_value()) {
+@@ -1018,6 +1088,9 @@ void WaylandToplevelWindow::UpdateWindowMask() {
+ }
+ 
+ void WaylandToplevelWindow::UpdateSessionStateIfNeeded() {
++  if (xx_pip_) {
++    return;
++  }
+   CHECK(xdg_toplevel_);
+   if (!session_) {
+     return;
+diff --git a/ui/ozone/platform/wayland/host/wayland_toplevel_window.h b/ui/ozone/platform/wayland/host/wayland_toplevel_window.h
+index 7e8f32b4b8f24c16fc1b903431ff915e056cf0da..2b113a8869afcd2f6074e683e313694a6205d8ec 100644
+--- a/ui/ozone/platform/wayland/host/wayland_toplevel_window.h
++++ b/ui/ozone/platform/wayland/host/wayland_toplevel_window.h
+@@ -32,6 +32,7 @@ namespace ui {
+ 
+ class OrgKdeKwinAppmenu;
+ class XdgToplevel;
++class XxPip;
+ 
+ class WaylandToplevelWindow : public WaylandWindow,
+                               public WmMoveResizeHandler,
+@@ -69,6 +70,7 @@ class WaylandToplevelWindow : public WaylandWindow,
+       int32_t width,
+       int32_t height,
+       const WindowStates& window_states) override;
++  void HandlePictureInPictureConfigureBounds(int32_t width, int32_t height);
+   void HandleSurfaceConfigure(uint32_t serial) override;
+   void OnSequencePoint(int64_t seq) override;
+   bool IsSurfaceConfigured() override;
+@@ -169,6 +171,9 @@ class WaylandToplevelWindow : public WaylandWindow,
+   // Calls UpdateWindowShape, set_input_region and set_opaque_region for this
+   // toplevel window.
+   void UpdateWindowMask() override;
++  gfx::Rect AdjustBoundsToCompositorConstraintsDIP(
++      const gfx::Rect& bounds_dip,
++      float ui_scale) const override;
+ 
+   void UpdateSystemModal();
+ 
+@@ -196,6 +201,8 @@ class WaylandToplevelWindow : public WaylandWindow,
+   // toplevel window.
+   bool CreateXdgToplevel();
+ 
++  bool HasShellRole() const;
++
+   WmMoveResizeHandler* AsWmMoveResizeHandler();
+ 
+   // Propagates the minimum size and maximum size to the ShellToplevel.
+@@ -216,6 +223,9 @@ class WaylandToplevelWindow : public WaylandWindow,
+   void TryAnnounceAppmenu();
+ 
+   std::unique_ptr<XdgToplevel> xdg_toplevel_;
++  std::unique_ptr<XxPip> xx_pip_;
++  bool use_xx_pip_ = false;
++  gfx::Size picture_in_picture_configure_bounds_;
+ 
+   // True if it's maximized before requesting the window state change from the
+   // client.
+diff --git a/ui/ozone/platform/wayland/host/wayland_window.cc b/ui/ozone/platform/wayland/host/wayland_window.cc
+index 81a046be49664b627a5ae73b6022febb0cafa051..5c979ff07d8a1aecf2e48297873765c2d854ba88 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window.cc
++++ b/ui/ozone/platform/wayland/host/wayland_window.cc
+@@ -1433,6 +1433,8 @@ void WaylandWindow::RequestState(PlatformWindowDelegate::State state,
+ 
+   // Adjust state values if necessary.
+   state.bounds_dip = AdjustBoundsToConstraintsDIP(state.bounds_dip);
++  state.bounds_dip =
++      AdjustBoundsToCompositorConstraintsDIP(state.bounds_dip, state.ui_scale);
+ 
+   const float scale = state.window_scale * state.ui_scale;
+ 
+@@ -1576,6 +1578,12 @@ gfx::Rect WaylandWindow::AdjustBoundsToConstraintsDIP(
+   return adjusted_bounds_dip;
+ }
+ 
++gfx::Rect WaylandWindow::AdjustBoundsToCompositorConstraintsDIP(
++    const gfx::Rect& bounds_dip,
++    float ui_scale) const {
++  return bounds_dip;
++}
++
+ void WaylandWindow::LatchStateRequest(const StateRequest& req) {
+   // Latch the most up to date state we have a frame back for.
+   auto old_state = latched_state_;
+diff --git a/ui/ozone/platform/wayland/host/wayland_window.h b/ui/ozone/platform/wayland/host/wayland_window.h
+index 7d82e02ad1b7ab23b006e1a25a0283a49b425159..7898924186a03dc169c82c7eb73777648de8a88b 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window.h
++++ b/ui/ozone/platform/wayland/host/wayland_window.h
+@@ -430,6 +430,12 @@ class WaylandWindow : public PlatformWindow,
+   // fixes them so they don't.
+   gfx::Rect AdjustBoundsToConstraintsDIP(const gfx::Rect& bounds_dip);
+ 
++  // Applies constraints imposed by the compositor after the window's own size
++  // constraints. Protocol roles with hard compositor limits can override this.
++  virtual gfx::Rect AdjustBoundsToCompositorConstraintsDIP(
++      const gfx::Rect& bounds_dip,
++      float ui_scale) const;
++
+   const gfx::Rect& restored_bounds_dip() const { return restored_bounds_dip_; }
+ 
+   WaylandFrameManager* frame_manager() { return frame_manager_.get(); }
+diff --git a/ui/ozone/platform/wayland/host/wayland_window_unittest.cc b/ui/ozone/platform/wayland/host/wayland_window_unittest.cc
+index 72c90c650865b800122cb2f81bf12c8ff08dc66c..a8a712c13b5e5fa4909ebdea8cce5b30fb09ebbe 100644
+--- a/ui/ozone/platform/wayland/host/wayland_window_unittest.cc
++++ b/ui/ozone/platform/wayland/host/wayland_window_unittest.cc
+@@ -72,6 +72,7 @@
+ #include "ui/ozone/platform/wayland/test/mock_surface.h"
+ #include "ui/ozone/platform/wayland/test/mock_wayland_platform_window_delegate.h"
+ #include "ui/ozone/platform/wayland/test/mock_xdg_surface.h"
++#include "ui/ozone/platform/wayland/test/mock_xx_pip.h"
+ #include "ui/ozone/platform/wayland/test/scoped_wl_array.h"
+ #include "ui/ozone/platform/wayland/test/test_keyboard.h"
+ #include "ui/ozone/platform/wayland/test/test_output.h"
+@@ -467,6 +468,121 @@ class WaylandWindowTest : public WaylandTest {
+   uint32_t frame_id_gen_ = 0u;
+ };
+ 
++class WaylandXxPipWindowTest : public WaylandTestSimple {
++ public:
++  WaylandXxPipWindowTest()
++      : WaylandTestSimple(wl::ServerConfig{.supports_xx_pip = true}) {}
++};
++
++TEST_F(WaylandXxPipWindowTest, UsesPictureInPictureRoleWhenAvailable) {
++  testing::NiceMock<MockWaylandPlatformWindowDelegate> delegate(
++      connection_.get());
++  PlatformWindowInitProperties properties;
++  properties.bounds = gfx::Rect(200, 150);
++  properties.type = PlatformWindowType::kWindow;
++  properties.is_picture_in_picture = true;
++  auto window =
++      delegate.CreateWaylandWindow(connection_.get(), std::move(properties));
++  ASSERT_TRUE(window);
++
++  window->Show(false);
++  WaylandTestBase::SyncDisplay();
++
++  const uint32_t surface_id = window->root_surface()->get_surface_id();
++  PostToServerAndWait([surface_id](wl::TestWaylandServerThread* server) {
++    auto* surface = server->GetObject<wl::MockSurface>(surface_id);
++    ASSERT_TRUE(surface);
++    ASSERT_TRUE(surface->xdg_surface());
++    EXPECT_FALSE(surface->xdg_surface()->xdg_toplevel());
++
++    auto* pip = server->xx_pip_shell_v1()->pip();
++    ASSERT_TRUE(pip);
++    EXPECT_EQ(pip->xdg_surface(), surface->xdg_surface());
++  });
++}
++
++TEST_F(WaylandXxPipWindowTest, ConstrainsSizeToConfiguredBounds) {
++  testing::NiceMock<MockWaylandPlatformWindowDelegate> delegate(
++      connection_.get());
++  ON_CALL(delegate, GetMinimumSizeForWindow())
++      .WillByDefault(Return(gfx::Size(500, 400)));
++  PlatformWindowInitProperties properties;
++  properties.bounds = gfx::Rect(800, 600);
++  properties.type = PlatformWindowType::kWindow;
++  properties.is_picture_in_picture = true;
++  auto window =
++      delegate.CreateWaylandWindow(connection_.get(), std::move(properties));
++  ASSERT_TRUE(window);
++
++  window->Show(false);
++  WaylandTestBase::SyncDisplay();
++
++  constexpr gfx::Size kConfigureBounds(400, 300);
++  EXPECT_CALL(delegate, OnBoundsChanged(Eq(kDefaultBoundsChange)));
++  PostToServerAndWait([kConfigureBounds](wl::TestWaylandServerThread* server) {
++    auto* pip = server->xx_pip_shell_v1()->pip();
++    ASSERT_TRUE(pip);
++    pip->SendConfigureBounds(kConfigureBounds);
++    pip->SendConfigureSize({0, 0});
++    pip->SendSurfaceConfigure(server->GetNextSerial());
++  });
++
++  EXPECT_EQ(kConfigureBounds, window->GetBoundsInDIP().size());
++}
++
++TEST_F(WaylandXxPipWindowTest, ConvertsConfiguredBoundsUsingUiScale) {
++  connection_->window_manager()->SetFontScale(1.25f);
++  Mock::VerifyAndClearExpectations(&delegate_);
++
++  testing::NiceMock<MockWaylandPlatformWindowDelegate> delegate(
++      connection_.get());
++  PlatformWindowInitProperties properties;
++  properties.bounds = gfx::Rect(800, 600);
++  properties.type = PlatformWindowType::kWindow;
++  properties.is_picture_in_picture = true;
++  auto window =
++      delegate.CreateWaylandWindow(connection_.get(), std::move(properties));
++  ASSERT_TRUE(window);
++
++  window->Show(false);
++  WaylandTestBase::SyncDisplay();
++
++  constexpr gfx::Size kConfigureBounds(400, 300);
++  EXPECT_CALL(delegate, OnBoundsChanged(Eq(kDefaultBoundsChange)));
++  PostToServerAndWait([kConfigureBounds](wl::TestWaylandServerThread* server) {
++    auto* pip = server->xx_pip_shell_v1()->pip();
++    ASSERT_TRUE(pip);
++    pip->SendConfigureBounds(kConfigureBounds);
++    pip->SendConfigureSize({0, 0});
++    pip->SendSurfaceConfigure(server->GetNextSerial());
++  });
++
++  EXPECT_EQ(gfx::Size(320, 240), window->GetBoundsInDIP().size());
++}
++
++TEST_P(WaylandWindowTest, PictureInPictureFallsBackToXdgToplevel) {
++  testing::NiceMock<MockWaylandPlatformWindowDelegate> delegate(
++      connection_.get());
++  PlatformWindowInitProperties properties;
++  properties.bounds = gfx::Rect(200, 150);
++  properties.type = PlatformWindowType::kWindow;
++  properties.is_picture_in_picture = true;
++  auto window =
++      delegate.CreateWaylandWindow(connection_.get(), std::move(properties));
++  ASSERT_TRUE(window);
++
++  window->Show(false);
++  WaylandTestBase::SyncDisplay();
++
++  const uint32_t surface_id = window->root_surface()->get_surface_id();
++  PostToServerAndWait([surface_id](wl::TestWaylandServerThread* server) {
++    auto* surface = server->GetObject<wl::MockSurface>(surface_id);
++    ASSERT_TRUE(surface);
++    ASSERT_TRUE(surface->xdg_surface());
++    EXPECT_TRUE(surface->xdg_surface()->xdg_toplevel());
++  });
++}
++
+ // Regression test for crbug.com/1433175
+ TEST_P(WaylandWindowTest, Shutdown) {
+   window_->PrepareForShutdown();
+diff --git a/ui/ozone/platform/wayland/host/xdg_surface.h b/ui/ozone/platform/wayland/host/xdg_surface.h
+index 9be5b0b39e85101160d8abddd0b6e6c04db8a2ae..0a287582a535021cbc617c40a69655a415d7a642 100644
+--- a/ui/ozone/platform/wayland/host/xdg_surface.h
++++ b/ui/ozone/platform/wayland/host/xdg_surface.h
+@@ -39,6 +39,7 @@ class XdgSurface {
+  private:
+   friend class XdgPopup;
+   friend class XdgToplevel;
++  friend class XxPip;
+ 
+   struct xdg_surface* wl_object() const { return xdg_surface_.get(); }
+ 
+diff --git a/ui/ozone/platform/wayland/host/xx_pip.cc b/ui/ozone/platform/wayland/host/xx_pip.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..dadf0629444adc16ffc23844d73feee80da386c2
+--- /dev/null
++++ b/ui/ozone/platform/wayland/host/xx_pip.cc
+@@ -0,0 +1,142 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/ozone/platform/wayland/host/xx_pip.h"
++
++#include <xx-pip-v1-client-protocol.h>
++
++#include <algorithm>
++#include <optional>
++
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/logging.h"
++#include "ui/base/hit_test.h"
++#include "ui/ozone/platform/wayland/common/wayland_util.h"
++#include "ui/ozone/platform/wayland/host/wayland_connection.h"
++#include "ui/ozone/platform/wayland/host/wayland_seat.h"
++#include "ui/ozone/platform/wayland/host/wayland_serial_tracker.h"
++#include "ui/ozone/platform/wayland/host/wayland_toplevel_window.h"
++#include "ui/ozone/platform/wayland/host/wayland_window.h"
++
++namespace ui {
++
++namespace {
++
++constexpr uint32_t kMaxVersion = 1;
++
++std::optional<wl::Serial> GetSerialForMoveResize(
++    WaylandConnection* connection) {
++  return connection->serial_tracker().GetSerial({wl::SerialType::kTouchPress,
++                                                 wl::SerialType::kMousePress,
++                                                 wl::SerialType::kKeyPress});
++}
++
++}  // namespace
++
++// static
++void XxPipShell::Instantiate(WaylandConnection* connection,
++                             wl_registry* registry,
++                             uint32_t name,
++                             const std::string& interface,
++                             uint32_t version) {
++  CHECK_EQ(interface, kInterfaceName) << "Expected \"" << kInterfaceName
++                                      << "\" but got \"" << interface << "\"";
++  if (connection->xx_pip_shell_v1_) {
++    return;
++  }
++
++  auto instance = wl::Bind<::xx_pip_shell_v1>(registry, name,
++                                              std::min(version, kMaxVersion));
++  if (!instance) {
++    LOG(ERROR) << "Failed to bind " << kInterfaceName;
++    return;
++  }
++  connection->xx_pip_shell_v1_ = std::move(instance);
++}
++
++XxPip::XxPip(std::unique_ptr<XdgSurface> xdg_surface)
++    : xdg_surface_(std::move(xdg_surface)) {
++  CHECK(xdg_surface_);
++}
++
++XxPip::~XxPip() = default;
++
++bool XxPip::Initialize(xx_pip_shell_v1* shell) {
++  CHECK(shell);
++  pip_.reset(xx_pip_shell_v1_get_pip(shell, xdg_surface_->wl_object()));
++  if (!pip_) {
++    LOG(ERROR) << "Failed to create xx_pip_v1";
++    return false;
++  }
++
++  connection()->window_manager()->NotifyWindowRoleAssigned(window());
++  static constexpr xx_pip_v1_listener kListener = {
++      .closed = &OnClosed,
++      .configure_bounds = &OnConfigureBounds,
++      .configure_size = &OnConfigureSize,
++  };
++  xx_pip_v1_add_listener(pip_.get(), &kListener, this);
++  return true;
++}
++
++void XxPip::SurfaceMove(WaylandConnection* connection) {
++  if (auto serial = GetSerialForMoveResize(connection)) {
++    xx_pip_v1_move(pip_.get(), connection->seat()->wl_object(), serial->value);
++  }
++}
++
++void XxPip::SurfaceResize(WaylandConnection* connection, uint32_t hittest) {
++  if (auto serial = GetSerialForMoveResize(connection)) {
++    xx_pip_v1_resize(pip_.get(), connection->seat()->wl_object(), serial->value,
++                     wl::IdentifyDirection(hittest));
++  }
++}
++
++void XxPip::SetAppId(const std::string& app_id) {
++  xx_pip_v1_set_app_id(pip_.get(), app_id.c_str());
++}
++
++void XxPip::SetWindowGeometry(const gfx::Rect& bounds) {
++  xdg_surface_->SetWindowGeometry(bounds);
++}
++
++void XxPip::AckConfigure(uint32_t serial) {
++  xdg_surface_->AckConfigure(serial);
++}
++
++bool XxPip::IsConfigured() {
++  return xdg_surface_->IsConfigured();
++}
++
++// static
++void XxPip::OnClosed(void* data, xx_pip_v1* pip) {
++  auto* self = static_cast<XxPip*>(data);
++  CHECK(self);
++  self->window()->OnCloseRequest();
++}
++
++// static
++void XxPip::OnConfigureBounds(void* data,
++                              xx_pip_v1* pip,
++                              int32_t width,
++                              int32_t height) {
++  auto* self = static_cast<XxPip*>(data);
++  CHECK(self);
++  auto* window = self->window()->AsWaylandToplevelWindow();
++  CHECK(window);
++  window->HandlePictureInPictureConfigureBounds(width, height);
++}
++
++// static
++void XxPip::OnConfigureSize(void* data,
++                            xx_pip_v1* pip,
++                            int32_t width,
++                            int32_t height) {
++  auto* self = static_cast<XxPip*>(data);
++  CHECK(self);
++  self->window()->HandleToplevelConfigure(width, height, {});
++}
++
++}  // namespace ui
+diff --git a/ui/ozone/platform/wayland/host/xx_pip.h b/ui/ozone/platform/wayland/host/xx_pip.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..410cd1202fe3a6ab775d79c2beca03573f7d9061
+--- /dev/null
++++ b/ui/ozone/platform/wayland/host/xx_pip.h
+@@ -0,0 +1,73 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_OZONE_PLATFORM_WAYLAND_HOST_XX_PIP_H_
++#define UI_OZONE_PLATFORM_WAYLAND_HOST_XX_PIP_H_
++
++#include <cstdint>
++#include <memory>
++#include <string>
++
++#include "ui/gfx/geometry/rect.h"
++#include "ui/ozone/platform/wayland/common/wayland_object.h"
++#include "ui/ozone/platform/wayland/host/xdg_surface.h"
++
++struct xx_pip_shell_v1;
++struct xx_pip_v1;
++
++namespace ui {
++
++class WaylandConnection;
++
++// Binds the experimental xx-pip-v1 compositor global when it is advertised.
++class XxPipShell : public wl::GlobalObjectRegistrar<XxPipShell> {
++ public:
++  static constexpr char kInterfaceName[] = "xx_pip_shell_v1";
++
++  static void Instantiate(WaylandConnection* connection,
++                          wl_registry* registry,
++                          uint32_t name,
++                          const std::string& interface,
++                          uint32_t version);
++
++  XxPipShell() = delete;
++};
++
++// Wrapper for the xx_pip_v1 xdg_surface role.
++class XxPip {
++ public:
++  explicit XxPip(std::unique_ptr<XdgSurface> xdg_surface);
++  XxPip(const XxPip&) = delete;
++  XxPip& operator=(const XxPip&) = delete;
++  ~XxPip();
++
++  bool Initialize(xx_pip_shell_v1* shell);
++  void SurfaceMove(WaylandConnection* connection);
++  void SurfaceResize(WaylandConnection* connection, uint32_t hittest);
++  void SetAppId(const std::string& app_id);
++  void SetWindowGeometry(const gfx::Rect& bounds);
++  void AckConfigure(uint32_t serial);
++  bool IsConfigured();
++
++ private:
++  static void OnClosed(void* data, xx_pip_v1* pip);
++  static void OnConfigureBounds(void* data,
++                                xx_pip_v1* pip,
++                                int32_t width,
++                                int32_t height);
++  static void OnConfigureSize(void* data,
++                              xx_pip_v1* pip,
++                              int32_t width,
++                              int32_t height);
++
++  WaylandConnection* connection() const { return xdg_surface_->connection_; }
++  WaylandWindow* window() const { return xdg_surface_->wayland_window_; }
++
++  const std::unique_ptr<XdgSurface> xdg_surface_;
++  wl::Object<xx_pip_v1> pip_;
++};
++
++}  // namespace ui
++
++#endif  // UI_OZONE_PLATFORM_WAYLAND_HOST_XX_PIP_H_
+diff --git a/ui/ozone/platform/wayland/protocols/xx-pip-v1.xml b/ui/ozone/platform/wayland/protocols/xx-pip-v1.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..eddff2974141b86464034583055b162c802bdf6b
+--- /dev/null
++++ b/ui/ozone/platform/wayland/protocols/xx-pip-v1.xml
+@@ -0,0 +1,305 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="xx_pip_v1">
++  <copyright>
++    Copyright © 2025 Vlad Zahorodnii
++
++    Permission is hereby granted, free of charge, to any person obtaining a
++    copy of this software and associated documentation files (the "Software"),
++    to deal in the Software without restriction, including without limitation
++    the rights to use, copy, modify, merge, publish, distribute, sublicense,
++    and/or sell copies of the Software, and to permit persons to whom the
++    Software is furnished to do so, subject to the following conditions:
++
++    The above copyright notice and this permission notice (including the next
++    paragraph) shall be included in all copies or substantial portions of the
++    Software.
++
++    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++    DEALINGS IN THE SOFTWARE.
++  </copyright>
++
++  <interface name="xx_pip_shell_v1" version="1">
++    <description summary="create picture-in-picture surfaces">
++      The xx_pip_shell_v1 interface provides a way to create picture-in-picture
++      windows.
++
++      Use cases are for example playing a video in a separate floating window.
++
++      Warning! The protocol described in this file is currently in the testing
++      phase. Backward compatible changes may be added together with the
++      corresponding interface version bump. Backward incompatible changes can
++      only be done by creating a new major version of the extension.
++    </description>
++
++    <enum name="error">
++      <entry name="role" value="0" summary="given wl_surface has another role"/>
++      <entry name="already_constructed" value="1" summary="wl_surface has a buffer attached or committed"/>
++    </enum>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy xx_pip_shell_v1">
++        Destroy this xx_pip_shell_v1 object. Objects that have been created
++        through this instance are unaffected.
++      </description>
++    </request>
++
++    <request name="get_pip">
++      <description summary="create picture-in-picture surface from a surface">
++        This creates an xx_pip_v1 for the given xdg_surface and gives the
++        associated wl_surface the xx_pip_v1 role.
++
++        If the wl_surface already has a role assigned, a role protocol error
++        will be raised.
++
++        Creating a picture-in-picture surface from a wl_surface which has a
++        buffer attached or committed is a client error, and any attempts by
++        a client to attach or manipulate a buffer prior to the first
++        xx_pip_v1.configure event must also be treated as errors.
++
++        After creating an xx_pip_v1 object and setting it up, the client
++        must perform an initial commit without any buffer attached.
++        The compositor will reply with a xx_pip_v1.configure event.
++        The client must acknowledge it and is then allowed to attach a buffer
++        to map the surface.
++
++        The compositor may deny showing the picture-in-picture surface, in
++        which case it will send the closed event before the first configure
++        event.
++
++        See the documentation of xdg_surface for more details about what an
++        xdg_surface is and how it is used.
++      </description>
++      <arg name="id" type="new_id" interface="xx_pip_v1"/>
++      <arg name="xdg_surface" type="object" interface="xdg_surface"/>
++    </request>
++  </interface>
++
++  <interface name="xx_pip_v1" version="1">
++    <description summary="picture-in-picture surface">
++      This interface defines an xdg_surface role which represents a floating
++      window with some miniature contents, for example a video.
++
++      The picture-in-picture window will be placed above all other windows.
++      Compositor-specific policies may override or customize the behavior
++      and the placement of the xx_pip_v1. For example, the compositor may
++      choose to put the xx_pip_v1 in a screen corner, etc.
++
++      Unmapping an xx_pip_v1 means that the surface cannot be shown
++      by the compositor until it is explicitly mapped again.
++      All active operations (e.g., move, resize) are canceled and all
++      attributes (e.g. title, state, stacking, ...) are discarded for
++      an xx_pip_v1 surface when it is unmapped. The xx_pip_v1 returns to
++      the state it had right after xx_pip_shell_v1.get_pip. The client
++      can re-map the pip by performing a commit without any buffer
++      attached, waiting for a configure event and handling it as usual (see
++      xdg_surface description).
++
++      Attaching a null buffer to a picture-in-picture unmaps the surface.
++    </description>
++
++    <enum name="error">
++      <entry name="invalid_size" value="0" summary="invalid surface size provided"/>
++      <entry name="invalid_origin" value="1" summary="invalid origin"/>
++      <entry name="invalid_resize_edge" value="2" summary="invalid resize edge"/>
++    </enum>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy the xx_pip_v1">
++        This request destroys the role surface and unmaps the surface.
++      </description>
++    </request>
++
++    <request name="set_app_id">
++      <description summary="set application ID">
++        Set an application identifier for the surface.
++
++        The app ID identifies the general class of applications to which
++        the surface belongs. The compositor can use this to group multiple
++        surfaces together, or to determine how to launch a new application.
++
++        For D-Bus activatable applications, the app ID is used as the D-Bus
++        service name.
++
++        The compositor shell will try to group application surfaces together
++        by their app ID. As a best practice, it is suggested to select app
++        ID's that match the basename of the application's .desktop file.
++        For example, "org.freedesktop.FooViewer" where the .desktop file is
++        "org.freedesktop.FooViewer.desktop".
++
++        Like other properties, a set_app_id request can be sent after the
++        xx_pip_v1 has been mapped to update the property.
++
++        See the desktop-entry specification [0] for more details on
++        application identifiers and how they relate to well-known D-Bus
++        names and .desktop files.
++
++        [0] http://standards.freedesktop.org/desktop-entry-spec/
++      </description>
++      <arg name="app_id" type="string"/>
++    </request>
++
++    <request name="set_origin">
++      <description summary="set origin surface">
++        Set the origin surface for the picture-in-picture surface.
++
++        The origin surface is an optional property that specifies a surface
++        from which the picture-in-picture surface has been launched. If set,
++        the compositor may use this hint to play an animation when the
++        picture-in-picture surface is mapped or unmapped. For example, smoothly
++        move the surface from the origin to a screen corner.
++
++        If the specified origin surface is the same as the picture-in-picture
++        surface, the invalid_origin protocol error will be posted.
++
++        The origin surface is double-buffered state, see wl_surface.commit.
++      </description>
++      <arg name="origin" type="object" interface="wl_surface"/>
++    </request>
++
++    <request name="set_origin_rect">
++      <description summary="set origin rect">
++        Set the origin rect within the origin surface for the picture-in-picture
++        surface.
++
++        The origin rect is an optional property that specifies the launch
++        rectangle within the origin surface. The compositor may use this hint
++        to play an animation when the picture-in-picture surface is mapped or
++        unmapped. For example, smoothly move the surface from the origin rect
++        to a screen corner.
++
++        The origin rect is specified in the surface-local coordinate space.
++
++        The compositor ignores the parts of the origin rect that fall outside
++        of the origin surface.
++
++        The origin rect is double-buffered state, see wl_surface.commit.
++      </description>
++      <arg name="x" type="int"/>
++      <arg name="y" type="int"/>
++      <arg name="width" type="uint"/>
++      <arg name="height" type="uint"/>
++    </request>
++
++    <request name="move">
++      <description summary="start an interactive move">
++        Start an interactive, user-driven move of the surface.
++
++        This request must be used in response to some sort of user action
++        like a button press, key press, or touch down event. The passed
++        serial is used to determine the type of interactive move (touch,
++        pointer, etc).
++
++        The server may ignore move requests depending on the state of
++        the surface, or if the passed serial is no longer valid.
++
++        If triggered, the surface will lose the focus of the device
++        (wl_pointer, wl_touch, etc) used for the move. It is up to the
++        compositor to visually indicate that the move is taking place, such as
++        updating a pointer cursor, during the move. There is no guarantee
++        that the device focus will return when the move is completed.
++      </description>
++      <arg name="seat" type="object" interface="wl_seat" summary="the wl_seat of the user event"/>
++      <arg name="serial" type="uint" summary="the serial of the user event"/>
++    </request>
++
++    <enum name="resize_edge">
++      <description summary="edge values for resizing">
++        These values are used to indicate which edge of a surface
++        is being dragged in a resize operation.
++      </description>
++      <entry name="none" value="0"/>
++      <entry name="top" value="1"/>
++      <entry name="bottom" value="2"/>
++      <entry name="left" value="4"/>
++      <entry name="top_left" value="5"/>
++      <entry name="bottom_left" value="6"/>
++      <entry name="right" value="8"/>
++      <entry name="top_right" value="9"/>
++      <entry name="bottom_right" value="10"/>
++    </enum>
++
++    <request name="resize">
++      <description summary="start an interactive resize">
++        Start a user-driven, interactive resize of the surface.
++
++        This request must be used in response to some sort of user action
++        like a button press, key press, or touch down event. The passed
++        serial is used to determine the type of interactive resize (touch,
++        pointer, etc).
++
++        The server may ignore resize requests depending on the state of
++        the surface, or if the passed serial is no longer valid.
++
++        If triggered, the surface also will lose the focus of the device
++        (wl_pointer, wl_touch, etc) used for the resize. It is up to the
++        compositor to visually indicate that the resize is taking place,
++        such as updating a pointer cursor, during the resize. There is no
++        guarantee that the device focus will return when the resize is
++        completed.
++
++        The edges parameter specifies how the surface should be resized,
++        and is one of the values of the resize_edge enum. The compositor
++        may use this information to update the surface position for
++        example when dragging the top left corner. The compositor may also
++        use this information to adapt its behavior, e.g. choose an
++        appropriate cursor image.
++      </description>
++      <arg name="seat" type="object" interface="wl_seat" summary="the wl_seat of the user event"/>
++      <arg name="serial" type="uint" summary="the serial of the user event"/>
++      <arg name="edges" type="uint" enum="resize_edge" summary="which edge or corner is being dragged"/>
++    </request>
++
++    <event name="closed">
++      <description summary="picture-in-picture surface has been closed">
++        The closed event is sent by the compositor when the surface will
++        no longer be shown. Further changes to the surface will be ignored.
++        The client should destroy the resource after receiving this event.
++      </description>
++    </event>
++
++    <event name="configure_bounds">
++      <description summary="surface bounds">
++        The configure_bounds event may be sent prior to a xx_pip_v1.configure
++        event to communicate the bounds a surface size must be constrained to.
++
++        The passed width and height are in surface coordinate space.
++
++        If the surface width or the surface height is greater than the specified
++        surface size bounds, an invalid_size protocol error will be posted.
++
++        The surface bounds subject to compositor policies.
++
++        The bounds may change at any point, and in such a case, a new
++        xx_pip_v1.configure_bounds will be sent, followed by xx_pip_v1.configure and
++        xdg_surface.configure.
++      </description>
++      <arg name="width" type="int"/>
++      <arg name="height" type="int"/>
++    </event>
++
++    <event name="configure_size">
++      <description summary="suggest a surface change">
++        This configure event asks the client to resize its pip surface.
++        The configured state should not be applied immediately. See
++        xdg_surface.configure for details.
++
++        The width and height arguments specify a hint to the window
++        about how its surface should be resized in window geometry
++        coordinates. See set_window_geometry.
++
++        If the width or height arguments are zero, it means the client
++        should decide its own window dimension.
++
++        Clients must send an ack_configure in response to this event. See
++        xdg_surface.configure and xdg_surface.ack_configure for details.
++      </description>
++      <arg name="width" type="int"/>
++      <arg name="height" type="int"/>
++    </event>
++  </interface>
++</protocol>
+diff --git a/ui/ozone/platform/wayland/test/mock_xx_pip.cc b/ui/ozone/platform/wayland/test/mock_xx_pip.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..144ed1c91904ab5945ea34a940c73bcb79f82283
+--- /dev/null
++++ b/ui/ozone/platform/wayland/test/mock_xx_pip.cc
+@@ -0,0 +1,101 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/ozone/platform/wayland/test/mock_xx_pip.h"
++
++#include <wayland-server-core.h>
++
++#include "base/check.h"
++#include "ui/ozone/platform/wayland/test/mock_xdg_surface.h"
++#include "ui/ozone/platform/wayland/test/server_object.h"
++
++namespace wl {
++
++namespace {
++
++void GetPip(wl_client* client,
++            wl_resource* resource,
++            uint32_t id,
++            wl_resource* xdg_surface_resource) {
++  auto* global = GetUserDataAs<MockXxPipShellV1>(resource);
++  auto* xdg_surface = GetUserDataAs<MockXdgSurface>(xdg_surface_resource);
++  CHECK(global);
++  CHECK(xdg_surface);
++
++  wl_resource* pip_resource = CreateResourceWithImpl<MockXxPipV1>(
++      client, &xx_pip_v1_interface, wl_resource_get_version(resource),
++      &kMockXxPipV1Impl, id, base::DoNothing(), global, xdg_surface);
++  if (pip_resource) {
++    global->set_pip(GetUserDataAs<MockXxPipV1>(pip_resource));
++  }
++}
++
++void SetAppId(wl_client* client, wl_resource* resource, const char* app_id) {
++  GetUserDataAs<MockXxPipV1>(resource)->set_app_id(app_id);
++}
++
++void SetOrigin(wl_client* client, wl_resource* resource, wl_resource* origin) {}
++
++void SetOriginRect(wl_client* client,
++                   wl_resource* resource,
++                   int32_t x,
++                   int32_t y,
++                   uint32_t width,
++                   uint32_t height) {}
++
++void Move(wl_client* client,
++          wl_resource* resource,
++          wl_resource* seat,
++          uint32_t serial) {}
++
++void Resize(wl_client* client,
++            wl_resource* resource,
++            wl_resource* seat,
++            uint32_t serial,
++            uint32_t edges) {}
++
++}  // namespace
++
++const struct xx_pip_shell_v1_interface kMockXxPipShellV1Impl = {
++    .destroy = DestroyResource,
++    .get_pip = GetPip,
++};
++
++const struct xx_pip_v1_interface kMockXxPipV1Impl = {
++    .destroy = DestroyResource,
++    .set_app_id = SetAppId,
++    .set_origin = SetOrigin,
++    .set_origin_rect = SetOriginRect,
++    .move = Move,
++    .resize = Resize,
++};
++
++MockXxPipShellV1::MockXxPipShellV1()
++    : GlobalObject(&xx_pip_shell_v1_interface, &kMockXxPipShellV1Impl, 1) {}
++
++MockXxPipShellV1::~MockXxPipShellV1() = default;
++
++MockXxPipV1::MockXxPipV1(wl_resource* resource,
++                         MockXxPipShellV1* global,
++                         MockXdgSurface* xdg_surface)
++    : ServerObject(resource), global_(global), xdg_surface_(xdg_surface) {}
++
++MockXxPipV1::~MockXxPipV1() {
++  CHECK_EQ(global_->pip(), this);
++  global_->set_pip(nullptr);
++}
++
++void MockXxPipV1::SendConfigureBounds(const gfx::Size& bounds) {
++  xx_pip_v1_send_configure_bounds(resource(), bounds.width(), bounds.height());
++}
++
++void MockXxPipV1::SendConfigureSize(const gfx::Size& size) {
++  xx_pip_v1_send_configure_size(resource(), size.width(), size.height());
++}
++
++void MockXxPipV1::SendSurfaceConfigure(uint32_t serial) {
++  xdg_surface_send_configure(xdg_surface_->resource(), serial);
++}
++
++}  // namespace wl
+diff --git a/ui/ozone/platform/wayland/test/mock_xx_pip.h b/ui/ozone/platform/wayland/test/mock_xx_pip.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c37abadacf403904e9eda37cc432876569a942e
+--- /dev/null
++++ b/ui/ozone/platform/wayland/test/mock_xx_pip.h
+@@ -0,0 +1,64 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_OZONE_PLATFORM_WAYLAND_TEST_MOCK_XX_PIP_H_
++#define UI_OZONE_PLATFORM_WAYLAND_TEST_MOCK_XX_PIP_H_
++
++#include <xx-pip-v1-server-protocol.h>
++
++#include <string>
++
++#include "base/memory/raw_ptr.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/ozone/platform/wayland/test/global_object.h"
++#include "ui/ozone/platform/wayland/test/server_object.h"
++
++namespace wl {
++
++class MockXdgSurface;
++class MockXxPipV1;
++
++extern const struct xx_pip_shell_v1_interface kMockXxPipShellV1Impl;
++extern const struct xx_pip_v1_interface kMockXxPipV1Impl;
++
++class MockXxPipShellV1 : public GlobalObject {
++ public:
++  MockXxPipShellV1();
++  MockXxPipShellV1(const MockXxPipShellV1&) = delete;
++  MockXxPipShellV1& operator=(const MockXxPipShellV1&) = delete;
++  ~MockXxPipShellV1() override;
++
++  void set_pip(MockXxPipV1* pip) { pip_ = pip; }
++  MockXxPipV1* pip() const { return pip_; }
++
++ private:
++  raw_ptr<MockXxPipV1> pip_ = nullptr;
++};
++
++class MockXxPipV1 : public ServerObject {
++ public:
++  MockXxPipV1(wl_resource* resource,
++              MockXxPipShellV1* global,
++              MockXdgSurface* xdg_surface);
++  MockXxPipV1(const MockXxPipV1&) = delete;
++  MockXxPipV1& operator=(const MockXxPipV1&) = delete;
++  ~MockXxPipV1() override;
++
++  MockXdgSurface* xdg_surface() const { return xdg_surface_; }
++  const std::string& app_id() const { return app_id_; }
++  void set_app_id(const char* app_id) { app_id_ = app_id; }
++
++  void SendConfigureBounds(const gfx::Size& bounds);
++  void SendConfigureSize(const gfx::Size& size);
++  void SendSurfaceConfigure(uint32_t serial);
++
++ private:
++  raw_ptr<MockXxPipShellV1> global_;
++  raw_ptr<MockXdgSurface> xdg_surface_;
++  std::string app_id_;
++};
++
++}  // namespace wl
++
++#endif  // UI_OZONE_PLATFORM_WAYLAND_TEST_MOCK_XX_PIP_H_
+diff --git a/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc b/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc
+index bf63c21ecbb8008ada142821d41c3b480c92fc2e..fbfc1f8792a14ab0adad804fa9788472c0db4cf8 100644
+--- a/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc
++++ b/ui/ozone/platform/wayland/test/test_wayland_server_thread.cc
+@@ -158,6 +158,10 @@ bool TestWaylandServerThread::Start() {
+   if (!xdg_toplevel_icon_manager_v1_.Initialize(display_.get())) {
+     return false;
+   }
++  if (config_.supports_xx_pip &&
++      !xx_pip_shell_v1_.Initialize(display_.get())) {
++    return false;
++  }
+ 
+   client_ = wl_client_create(display_.get(), server_fd.release());
+   if (!client_)
+diff --git a/ui/ozone/platform/wayland/test/test_wayland_server_thread.h b/ui/ozone/platform/wayland/test/test_wayland_server_thread.h
+index ffb45991b6ad4e1918894140ecb2880d3ae43187..a70c9f68142d402b001d6966cad971d6908d4f05 100644
+--- a/ui/ozone/platform/wayland/test/test_wayland_server_thread.h
++++ b/ui/ozone/platform/wayland/test/test_wayland_server_thread.h
+@@ -22,6 +22,7 @@
+ #include "ui/ozone/platform/wayland/test/mock_xdg_activation_v1.h"
+ #include "ui/ozone/platform/wayland/test/mock_xdg_shell.h"
+ #include "ui/ozone/platform/wayland/test/mock_xdg_toplevel_icon.h"
++#include "ui/ozone/platform/wayland/test/mock_xx_pip.h"
+ #include "ui/ozone/platform/wayland/test/mock_zwp_linux_dmabuf.h"
+ #include "ui/ozone/platform/wayland/test/test_alpha_compositing.h"
+ #include "ui/ozone/platform/wayland/test/test_compositor.h"
+@@ -62,6 +63,7 @@ struct ServerConfig {
+   ShouldUseLinuxDrmSyncobjProtocol use_linux_drm_syncobj =
+       ShouldUseLinuxDrmSyncobjProtocol::kNone;
+   bool supports_viewporter_surface_scaling = true;
++  bool supports_xx_pip = false;
+ };
+ 
+ class TestWaylandServerThread;
+@@ -157,6 +159,8 @@ class TestWaylandServerThread : public base::Thread,
+     return &xdg_toplevel_icon_manager_v1_;
+   }
+ 
++  MockXxPipShellV1* xx_pip_shell_v1() { return &xx_pip_shell_v1_; }
++
+   wl_client* client() const { return client_; }
+ 
+   void OnClientDestroyed(wl_client* client);
+@@ -220,6 +224,7 @@ class TestWaylandServerThread : public base::Thread,
+   TestWpPointerGestures wp_pointer_gestures_;
+   MockXdgActivationV1 xdg_activation_v1_;
+   MockXdgToplevelIconManagerV1 xdg_toplevel_icon_manager_v1_;
++  MockXxPipShellV1 xx_pip_shell_v1_;
+   std::unique_ptr<TestSelectionDeviceManager> primary_selection_device_manager_;
+ 
+   std::vector<std::unique_ptr<GlobalObject>> globals_;
+diff --git a/ui/platform_window/platform_window_init_properties.h b/ui/platform_window/platform_window_init_properties.h
+index fe72bc821b0f74f0eddd100e867e7f66b550b808..40cbabeac4de0bf7f947087d081f2c24d2e4bd7e 100644
+--- a/ui/platform_window/platform_window_init_properties.h
++++ b/ui/platform_window/platform_window_init_properties.h
+@@ -112,6 +112,7 @@ struct COMPONENT_EXPORT(PLATFORM_WINDOW) PlatformWindowInitProperties {
+   bool keep_on_top = false;
+   bool is_security_surface = false;
+   bool visible_on_all_workspaces = false;
++  bool is_picture_in_picture = false;
+   bool remove_standard_frame = false;
+   std::string workspace;
+   ZOrderLevel z_order = ZOrderLevel::kNormal;
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc
+index d5381353a7673c3e841033d474e2f7065931d824..8e6505f9b72f40cc379553e2c27466f10fd74ff1 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc
+@@ -140,6 +140,7 @@ ui::PlatformWindowInitProperties ConvertWidgetInitParamsToInitProperties(
+   properties.is_security_surface =
+       properties.z_order == ui::ZOrderLevel::kSecuritySurface;
+   properties.visible_on_all_workspaces = params.visible_on_all_workspaces;
++  properties.is_picture_in_picture = params.is_picture_in_picture;
+   properties.remove_standard_frame = params.remove_standard_frame;
+   properties.workspace = params.workspace;
+   properties.opacity = GetPlatformWindowOpacity(params.opacity);
+diff --git a/ui/views/widget/widget.h b/ui/views/widget/widget.h
+index eeee14f641129c5d9e84982fc51faa7441e72349..8a45c5b50810f0710f04fe2fdc06cf4b054b958a 100644
+--- a/ui/views/widget/widget.h
++++ b/ui/views/widget/widget.h
+@@ -386,6 +386,11 @@ class VIEWS_EXPORT Widget : public internal::NativeWidgetDelegate,
+ 
+     bool visible_on_all_workspaces = false;
+ 
++    // Whether the widget represents a picture-in-picture window. Platforms
++    // with a dedicated compositor role can use it instead of a regular
++    // toplevel window.
++    bool is_picture_in_picture = false;
++
+     // See Widget class comment above.
+     Ownership ownership;
+ 

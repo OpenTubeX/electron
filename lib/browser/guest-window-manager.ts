@@ -46,9 +46,12 @@ export function openGuestWindow({
 }): void {
   const { url, frameName, features } = windowOpenArgs;
   const { options: parsedOptions } = parseFeatures(features);
-  const pictureInPictureOptions: BrowserWindowConstructorOptions =
+  const pictureInPictureOptions: BrowserWindowConstructorOptions & {
+    _isPictureInPicture?: boolean;
+  } =
     disposition === 'picture-in-picture'
       ? {
+          _isPictureInPicture: true,
           alwaysOnTop: true,
           autoHideMenuBar: true,
           frame: false,
