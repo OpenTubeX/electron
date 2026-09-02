@@ -4707,6 +4707,7 @@ describe('webContents module', () => {
 
       expect(openDetails?.disposition).to.equal('picture-in-picture');
       expect(createDetails.disposition).to.equal('picture-in-picture');
+      expect(createDetails.options.frame).to.be.false();
       expect(child.getContentSize()).to.deep.equal([320, 240]);
       expect(child.isAlwaysOnTop()).to.be.true();
       if (process.platform !== 'linux') {

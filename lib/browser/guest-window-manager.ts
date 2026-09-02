@@ -51,6 +51,7 @@ export function openGuestWindow({
       ? {
           alwaysOnTop: true,
           autoHideMenuBar: true,
+          frame: false,
           fullscreenable: false,
           maximizable: false,
           minimizable: false,
