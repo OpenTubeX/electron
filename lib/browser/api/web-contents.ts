@@ -707,10 +707,10 @@ WebContents.prototype._init = function () {
         webContents,
         disposition,
         _userGesture,
-        _left,
-        _top,
-        _width,
-        _height,
+        left,
+        top,
+        width,
+        height,
         url,
         frameName,
         referrer,
@@ -726,15 +726,25 @@ WebContents.prototype._init = function () {
         // false is the default
         windowOpenOutlivesOpenerOption = false;
 
-        if (disposition !== 'foreground-tab' && disposition !== 'new-window' && disposition !== 'background-tab') {
+        if (
+          disposition !== 'foreground-tab' &&
+          disposition !== 'new-window' &&
+          disposition !== 'background-tab' &&
+          disposition !== 'picture-in-picture'
+        ) {
           event.preventDefault();
           return;
         }
 
+        const initialBounds = disposition === 'picture-in-picture' ? { x: left, y: top, width, height } : {};
+
         openGuestWindow({
           embedder: this,
           guest: webContents,
-          overrideBrowserWindowOptions: overriddenOptions,
+          overrideBrowserWindowOptions: {
+            ...initialBounds,
+            ...overriddenOptions
+          },
           disposition,
           referrer,
           postData,

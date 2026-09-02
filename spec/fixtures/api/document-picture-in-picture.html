@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Document Picture-in-Picture</title>
+  </head>
+  <body>
+    <div id="document-pip-marker">Document PiP</div>
+    <script>
+      window.openDocumentPictureInPicture = async () => {
+        const pipWindow = await documentPictureInPicture.requestWindow({
+          width: 320,
+          height: 240
+        })
+
+        pipWindow.document.body.append(document.getElementById('document-pip-marker'))
+
+        return {
+          displayMode: pipWindow.matchMedia('(display-mode: picture-in-picture)').matches,
+          height: pipWindow.innerHeight,
+          width: pipWindow.innerWidth
+        }
+      }
+    </script>
+  </body>
+</html>
