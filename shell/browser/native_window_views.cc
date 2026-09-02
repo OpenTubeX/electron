@@ -293,6 +293,8 @@ NativeWindowViews::NativeWindowViews(const int32_t base_window_id,
                            InitParams::TYPE_WINDOW};
   params.bounds = bounds;
   params.delegate = this;
+  params.is_picture_in_picture =
+      options.ValueOrDefault(options::kIsPictureInPicture, false);
   params.remove_standard_frame = !has_frame() || has_client_frame();
 
   // If a client frame, we need to draw our own shadows.

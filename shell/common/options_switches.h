@@ -57,6 +57,9 @@ inline constexpr std::string_view kSimpleFullscreen = "simpleFullscreen";
 // Make windows stays on the top of all other windows.
 inline constexpr std::string_view kAlwaysOnTop = "alwaysOnTop";
 
+// Internal marker for compositor-native picture-in-picture windows.
+inline constexpr std::string_view kIsPictureInPicture = "_isPictureInPicture";
+
 // Enable the NSView to accept first mouse event.
 inline constexpr std::string_view kAcceptFirstMouse = "acceptFirstMouse";
 
