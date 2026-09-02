@@ -3797,6 +3797,78 @@ describe('webContents module', () => {
     });
   });
 
+  describe('Document Picture-in-Picture', () => {
+    afterEach(closeAllWindows);
+
+    it('creates a dedicated child window', async () => {
+      const w = new BrowserWindow({ webPreferences: { sandbox: true } });
+      await w.loadFile(path.join(fixturesPath, 'api', 'document-picture-in-picture.html'));
+
+      let openDetails: Electron.HandlerDetails | undefined;
+      w.webContents.setWindowOpenHandler((details) => {
+        openDetails = details;
+        return { action: 'allow' };
+      });
+
+      const childPromise = once(w.webContents, 'did-create-window') as Promise<
+        [BrowserWindow, Electron.DidCreateWindowDetails]
+      >;
+      const rendererResultPromise = w.webContents.executeJavaScript('openDocumentPictureInPicture()', true);
+
+      const [[child, createDetails], rendererResult] = await Promise.all([childPromise, rendererResultPromise]);
+
+      expect(openDetails?.disposition).to.equal('picture-in-picture');
+      expect(createDetails.disposition).to.equal('picture-in-picture');
+      expect(child.getContentSize()).to.deep.equal([320, 240]);
+      expect(child.isAlwaysOnTop()).to.be.true();
+      if (process.platform !== 'linux') {
+        expect(child.isMinimizable()).to.be.false();
+        expect(child.isMaximizable()).to.be.false();
+      }
+      expect(child.isFullScreenable()).to.be.false();
+      expect(rendererResult).to.deep.equal({
+        displayMode: true,
+        height: 240,
+        width: 320
+      });
+      expect(
+        await child.webContents.executeJavaScript('document.getElementById("document-pip-marker").textContent')
+      ).to.equal('Document PiP');
+      const nestedResult = await child.webContents.executeJavaScript(`(async () => {
+        try {
+          await documentPictureInPicture.requestWindow();
+          return 'opened';
+        } catch (error) {
+          return error.name;
+        }
+      })()`, true);
+      expect(nestedResult).to.equal('NotAllowedError');
+      expect(BrowserWindow.getAllWindows()).to.have.length(2);
+
+      const boundsUpdated = once(child.webContents, 'content-bounds-updated') as Promise<
+        [Electron.Event, Electron.Rectangle]
+      >;
+      child.webContents.executeJavaScript('window.resizeTo(10000, 10000)', true);
+      const [, resizedBounds] = await boundsUpdated;
+      expect(resizedBounds.width).to.be.lessThan(10000);
+      expect(resizedBounds.height).to.be.lessThan(10000);
+      await new Promise(setImmediate);
+      expect(child.getSize()[0]).to.be.lessThan(10000);
+      expect(child.getSize()[1]).to.be.lessThan(10000);
+
+      const clearedAtPageHide = w.webContents.executeJavaScript(`new Promise(resolve => {
+        documentPictureInPicture.window.addEventListener('pagehide', () => {
+          setTimeout(() => resolve(documentPictureInPicture.window === null));
+        }, { once: true });
+      })`);
+      const closed = once(child, 'closed');
+      child.close();
+      await closed;
+      expect(await clearedAtPageHide).to.be.true();
+      await waitUntil(async () => w.webContents.executeJavaScript('documentPictureInPicture.window === null'));
+    });
+  });
+
   describe('Shared Workers', () => {
     afterEach(closeAllWindows);
 
