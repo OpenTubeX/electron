@@ -746,6 +746,9 @@ class WebContents final : public ExclusiveAccessContext,
   bool IsFullscreenForTabOrPending(const content::WebContents* source) override;
   content::FullscreenState GetFullscreenState(
       const content::WebContents* web_contents) const override;
+  blink::mojom::DisplayMode GetDisplayMode(
+      const content::WebContents* web_contents) override;
+  std::optional<gfx::Rect> GetWindowBoundsInScreen() override;
   bool TakeFocus(content::WebContents* source, bool reverse) override;
   content::PictureInPictureResult EnterPictureInPicture(
       content::WebContents* web_contents) override;

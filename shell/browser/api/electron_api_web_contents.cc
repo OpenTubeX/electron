@@ -280,6 +280,9 @@ struct Converter<WindowOpenDisposition> {
       case WindowOpenDisposition::SAVE_TO_DISK:
         disposition = "save-to-disk";
         break;
+      case WindowOpenDisposition::NEW_PICTURE_IN_PICTURE:
+        disposition = "picture-in-picture";
+        break;
       default:
         break;
     }
@@ -1498,6 +1501,33 @@ content::WebContents* WebContents::AddNewContents(
 
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
 
+  gfx::Rect child_window_bounds = window_features.bounds;
+  if (disposition == WindowOpenDisposition::NEW_PICTURE_IN_PICTURE) {
+    if (PictureInPictureWindowManager::IsChildWebContents(source)) {
+      if (was_blocked)
+        *was_blocked = true;
+      return nullptr;
+    }
+
+    const auto& pip_options = new_contents->GetPictureInPictureOptions();
+    if (!pip_options) {
+      if (was_blocked)
+        *was_blocked = true;
+      return nullptr;
+    }
+
+    auto* const screen = display::Screen::Get();
+    const display::Display display =
+        owner_window()
+            ? screen->GetDisplayNearestWindow(owner_window()->GetNativeWindow())
+            : screen->GetDisplayForNewWindows();
+    auto* const pip_manager = PictureInPictureWindowManager::GetInstance();
+    child_window_bounds =
+        pip_manager->CalculateInitialPictureInPictureWindowBounds(*pip_options,
+                                                                  display);
+    pip_manager->EnterDocumentPictureInPicture(source, new_contents.get());
+  }
+
   Type type = Type::kBrowserWindow;
   auto* web_preferences = WebContentsPreferences::From(new_contents.get());
   if (web_preferences && web_preferences->IsOffscreen())
@@ -1525,8 +1555,8 @@ content::WebContents* WebContents::AddNewContents(
   }
 
   if (Emit("-add-new-contents", api_web_contents, disposition, user_gesture,
-           window_features.bounds.x(), window_features.bounds.y(),
-           window_features.bounds.width(), window_features.bounds.height(),
+           child_window_bounds.x(), child_window_bounds.y(),
+           child_window_bounds.width(), child_window_bounds.height(),
            tracker->url, tracker->frame_name, tracker->referrer,
            tracker->raw_features, tracker->body)) {
     // Destroy() may synchronously `delete this`, so drop the handle's
@@ -1626,9 +1656,30 @@ void WebContents::BeforeUnloadFired(content::WebContents* tab,
 
 void WebContents::SetContentsBounds(content::WebContents* source,
                                     const gfx::Rect& rect) {
+  gfx::Rect bounds = rect;
+  if (PictureInPictureWindowManager::IsChildWebContents(GetWebContents()) &&
+      owner_window()) {
+    const gfx::Rect current_bounds = owner_window()->GetBounds();
+    if (bounds.width() > current_bounds.width() ||
+        bounds.height() > current_bounds.height()) {
+      const display::Display display =
+          display::Screen::Get()->GetDisplayNearestWindow(
+              owner_window()->GetNativeWindow());
+      const gfx::Size adjusted_size =
+          PictureInPictureWindowManager::AdjustRequestedSizeIfNecessary(
+              bounds.size(), display);
+      if (adjusted_size != bounds.size()) {
+        bounds = current_bounds;
+        bounds.ToCenteredSize(adjusted_size);
+        bounds.AdjustToFit(display.work_area());
+      }
+    }
+  }
+
   base::AutoReset<bool> resetter(&is_emitting_event_, true);
-  if (!Emit("content-bounds-updated", rect))
-    observers_.Notify(&ExtendedWebContentsObserver::OnSetContentBounds, rect);
+  if (!Emit("content-bounds-updated", bounds)) {
+    observers_.Notify(&ExtendedWebContentsObserver::OnSetContentBounds, bounds);
+  }
 }
 
 void WebContents::CloseContents(content::WebContents* source) {
@@ -4581,6 +4632,23 @@ content::FullscreenState WebContents::GetFullscreenState(
   return const_cast<ExclusiveAccessManager*>(&exclusive_access_manager_)
       ->fullscreen_controller()
       ->GetFullscreenState(source);
+}
+
+blink::mojom::DisplayMode WebContents::GetDisplayMode(
+    const content::WebContents* web_contents) {
+  if (PictureInPictureWindowManager::IsChildWebContents(GetWebContents()))
+    return blink::mojom::DisplayMode::kPictureInPicture;
+
+  return content::WebContentsDelegate::GetDisplayMode(web_contents);
+}
+
+std::optional<gfx::Rect> WebContents::GetWindowBoundsInScreen() {
+  if (!PictureInPictureWindowManager::IsChildWebContents(GetWebContents()) ||
+      !owner_window()) {
+    return std::nullopt;
+  }
+
+  return owner_window()->GetBounds();
 }
 
 bool WebContents::TakeFocus(content::WebContents* source, bool reverse) {
